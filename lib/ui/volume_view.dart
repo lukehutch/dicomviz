@@ -33,6 +33,9 @@ class RenderSettings extends ChangeNotifier {
   double stepVoxels = 0.5;
   bool shading = true;
 
+  /// Half-width in voxels of the gradient stencil used for lighting.
+  double normalSmoothing = 2;
+
   void changed() => notifyListeners();
 }
 
@@ -302,6 +305,7 @@ class _RaycastPainter extends CustomPainter {
     // volumeOpacityDepth voxels of depth.
     f(surfaces ? 1.0 : settings.stepVoxels / volumeOpacityDepth);
     f(settings.shading ? 1.0 : 0.0);
+    f(settings.normalSmoothing);
     f(0.07);
     f(0.07);
     f(0.09);

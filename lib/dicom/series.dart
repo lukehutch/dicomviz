@@ -3,6 +3,7 @@ import 'dart:isolate';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'cbct.dart';
 import 'dicom_parser.dart';
 
 /// One DICOM series found in a folder.
@@ -17,6 +18,7 @@ class SeriesInfo {
     required this.columns,
     required this.frames,
     required this.isVolume,
+    this.reconstruct = false,
   });
 
   final String uid;
@@ -33,6 +35,10 @@ class SeriesInfo {
   /// True when the frames are parallel slices with known positions, so the
   /// series can be rendered in 3D.
   final bool isVolume;
+
+  /// True for a volume reconstructed from a cone-beam projection series
+  /// ([files] is that series).
+  final bool reconstruct;
 
   String get sizeLabel => '$columns×$rows×$frames';
 }
@@ -61,28 +67,48 @@ List<SeriesInfo> _scan(String dir) {
     (groups[uid] ??= []).add(h);
   }
   final result = <SeriesInfo>[];
+  final reconstructions = <String, SeriesInfo>{};
   for (final MapEntry(key: uid, value: hs) in groups.entries) {
     final first = hs.first.f;
     final frames = hs.fold<int>(0, (n, h) => n + h.f.numberOfFrames);
     final singleFrame = hs.every((h) => h.f.numberOfFrames == 1);
     final isVolume = singleFrame &&
         hs.length >= 3 &&
-        hs.every((h) =>
-            h.position != null &&
-            h.orientation?.length == 6 &&
-            h.f.rows == first.rows &&
-            h.f.columns == first.columns);
-    result.add(SeriesInfo(
-      uid: uid,
-      description: first.string(Tag.seriesDescription) ?? '',
-      modality: first.string(Tag.modality) ?? '',
-      seriesNumber: first.intOr(Tag.seriesNumber, 0),
-      files: [for (final h in hs) h.path]..sort(),
-      rows: first.rows,
-      columns: first.columns,
-      frames: frames,
-      isVolume: isVolume,
-    ));
+        hs.every(
+          (h) =>
+              h.position != null &&
+              h.orientation?.length == 6 &&
+              h.f.rows == first.rows &&
+              h.f.columns == first.columns,
+        );
+    result.add(
+      SeriesInfo(
+        uid: uid,
+        description: first.string(Tag.seriesDescription) ?? '',
+        modality: first.string(Tag.modality) ?? '',
+        seriesNumber: first.intOr(Tag.seriesNumber, 0),
+        files: [for (final h in hs) h.path]..sort(),
+        rows: first.rows,
+        columns: first.columns,
+        frames: frames,
+        isVolume: isVolume,
+      ),
+    );
+    final g = hs.length == 1 ? ConeBeamGeometry.of(first) : null;
+    if (g != null) {
+      reconstructions[uid] = SeriesInfo(
+        uid: '$uid/reconstruction',
+        description: 'Reconstructed from projections',
+        modality: first.string(Tag.modality) ?? '',
+        seriesNumber: first.intOr(Tag.seriesNumber, 0),
+        files: [hs.first.path],
+        rows: g.nxy,
+        columns: g.nxy,
+        frames: g.nz,
+        isVolume: true,
+        reconstruct: true,
+      );
+    }
   }
   // Volumes first, then by series number.
   result.sort((a, b) {
@@ -90,6 +116,11 @@ List<SeriesInfo> _scan(String dir) {
     final c = a.seriesNumber.compareTo(b.seriesNumber);
     return c != 0 ? c : a.uid.compareTo(b.uid);
   });
+  // Each reconstruction goes right after its projection series.
+  for (var i = result.length - 1; i >= 0; i--) {
+    final r = reconstructions[result[i].uid];
+    if (r != null) result.insert(i + 1, r);
+  }
   return result;
 }
 
@@ -202,6 +233,7 @@ typedef Progress = void Function(double fraction, String stage);
 
 /// Loads a volume series in a background isolate.
 Future<VolumeData> loadVolume(SeriesInfo s, {Progress? onProgress}) async {
+  if (s.reconstruct) return reconstructVolume(s, onProgress: onProgress);
   final port = ReceivePort();
   var decoded = 0;
   final total = s.files.length;
@@ -289,12 +321,31 @@ Future<VolumeData> _loadVolume(List<String> files, SendPort progress) async {
     }());
   }
   await Future.wait(futures);
+  return packVolume([for (final s in slices) s!], w, h, [sx, sy, sz.abs()], [
+    ...rowDir,
+    ...colDir,
+    ...normal,
+  ], progress);
+}
+
+/// Packs [slices] (each [w] x [h], in order along the slice normal) into an
+/// atlas. [spacing] is the voxel size and [axes] the patient-space
+/// directions of x, y and z, as in [VolumeData].
+VolumeData packVolume(
+  List<Int16List> slices,
+  int w,
+  int h,
+  List<double> spacing,
+  List<double> axes,
+  SendPort progress,
+) {
   progress.send([0.8, 'Packing volume']);
+  final n = slices.length;
 
   // Value range.
   var mn = 32767, mx = -32768;
   for (final s in slices) {
-    for (final v in s!) {
+    for (final v in s) {
       if (v < mn) mn = v;
       if (v > mx) mx = v;
     }
@@ -337,7 +388,7 @@ Future<VolumeData> _loadVolume(List<String> files, SendPort progress) async {
   for (var z = 0; z < vn; z++) {
     final g = z ~/ 3, ch = z % 3;
     final tx = (g % cols) * vw, ty = (g ~/ cols) * vh;
-    final src = slices[z * f]!;
+    final src = slices[z * f];
     for (var y = 0; y < vh; y++) {
       final rowOff = ((ty + y) * aw + tx) * 4 + ch;
       final srcOff = y * f * w;
@@ -352,8 +403,8 @@ Future<VolumeData> _loadVolume(List<String> files, SendPort progress) async {
 
   return VolumeData(
     dims: [vw, vh, vn],
-    spacing: [sx * f, sy * f, sz.abs() * f],
-    axes: [...rowDir, ...colDir, ...normal],
+    spacing: [for (final s in spacing) s * f],
+    axes: axes,
     atlas: atlas,
     atlasCols: cols,
     atlasWidth: aw,
@@ -387,7 +438,8 @@ Future<ImageStack> openImageStack(SeriesInfo s) => Isolate.run(() {
       return ImageStack(s, refs);
     });
 
-/// A decoded 2D frame with a default display window.
+/// A decoded 2D frame with a default display window. [values] increase
+/// with density; NaN marks pixels that received no X-rays.
 class Frame2D {
   Frame2D(this.width, this.height, this.values, this.windowCenter, this.windowWidth);
   final int width;
@@ -397,18 +449,62 @@ class Frame2D {
   final double windowWidth;
 }
 
-Future<Frame2D> loadFrame(String path, int index) => Isolate.run(() {
-      final f = DicomFile.parse(path, File(path).readAsBytesSync());
-      final v = f.decodeFrame(index);
-      var mn = double.infinity, mx = -double.infinity;
-      for (final x in v) {
-        if (x < mn) mn = x;
-        if (x > mx) mx = x;
+double _median(List<double> x) => x.isEmpty ? 0 : (x..sort())[x.length ~/ 2];
+
+/// Whether [v] holds X-ray intensities (high where the beam passed through
+/// air). Air surrounds the patient, so the border is compared with the
+/// center. Pixels at the minimum (collimated, no beam) are ignored. The
+/// Pixel Intensity Relationship Sign tag is not used: the DX images in the
+/// test data set it to -1 although their air is near 65535.
+bool _isIntensity(Float32List v, int w, int h) {
+  var mn = double.infinity;
+  for (final x in v) {
+    if (x < mn) mn = x;
+  }
+  final border = <double>[], center = <double>[];
+  final bw = math.max(w ~/ 10, 1), bh = math.max(h ~/ 10, 1);
+  for (var y = 0; y < h; y++) {
+    for (var x = 0; x < w; x++) {
+      final p = v[y * w + x];
+      if (p <= mn) continue;
+      if (x < bw || x >= w - bw || y < bh || y >= h - bh) {
+        border.add(p);
+      } else if (x >= w ~/ 3 &&
+          x < 2 * w ~/ 3 &&
+          y >= h ~/ 3 &&
+          y < 2 * h ~/ 3) {
+        center.add(p);
       }
-      final wc = f.doubles(Tag.windowCenter)?.first;
-      final ww = f.doubles(Tag.windowWidth)?.first;
-      // A window covering the full 16-bit range is no better than min/max.
-      final useTags = wc != null && ww != null && ww > 1 && ww < 65536;
-      return Frame2D(f.columns, f.rows, v, useTags ? wc : (mn + mx) / 2,
-          useTags ? ww : math.max(mx - mn, 1));
-    });
+    }
+  }
+  return _median(border) > _median(center);
+}
+
+Future<Frame2D> loadFrame(String path, int index) => Isolate.run(() {
+  final f = DicomFile.parse(path, File(path).readAsBytesSync());
+  final v = f.decodeFrame(index);
+  final intensity = _isIntensity(v, f.columns, f.rows);
+  if (intensity) {
+    // -ln(I) is proportional to the attenuation summed along the ray.
+    // Pixels at zero were behind the collimator and carry no data.
+    for (var i = 0; i < v.length; i++) {
+      v[i] = v[i] > 0 ? -math.log(v[i]) : double.nan;
+    }
+  }
+  final wc = f.doubles(Tag.windowCenter)?.first;
+  final ww = f.doubles(Tag.windowWidth)?.first;
+  // A window covering the full 16-bit range is no better than none.
+  final useTags =
+      !intensity && wc != null && ww != null && ww > 1 && ww < 65536;
+  var center = wc ?? 0, width = ww ?? 1;
+  if (!useTags && v.any((x) => !x.isNaN)) {
+    // 0.5th to 99.5th percentile, so a few extreme pixels do not squeeze
+    // the image into a small part of the range.
+    final s = Float32List.fromList(v.where((x) => !x.isNaN).toList())..sort();
+    final lo = s[(s.length * 0.005).floor()];
+    final hi = s[math.min((s.length * 0.995).floor(), s.length - 1)];
+    center = (lo + hi) / 2;
+    width = math.max(hi - lo, 1);
+  }
+  return Frame2D(f.columns, f.rows, v, center, width);
+});

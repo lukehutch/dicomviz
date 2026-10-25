@@ -277,10 +277,10 @@ class _Reader {
     }
     final bytes = Uint8List.sublistView(d, valueOff, end);
     pos = end;
-    // Only keep values a viewer reads; sequences with defined length are
-    // skipped as a whole.
+    // Only keep values a viewer reads, including private (odd group)
+    // vendor data; sequences with defined length are skipped as a whole.
     if (vr == 'SQ') return (tag, DicomElement(vr, Uint8List(0)));
-    if (!_binaryVrs.contains(vr) || bytes.length <= 64) {
+    if (!_binaryVrs.contains(vr) || bytes.length <= 64 || (tag >> 16).isOdd) {
       return (tag, DicomElement(vr, bytes));
     }
     return (tag, DicomElement(vr, Uint8List(0)));

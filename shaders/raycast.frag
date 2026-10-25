@@ -23,6 +23,7 @@ uniform float uTanHalfFov;
 uniform float uStep;       // step length in world units
 uniform float uStepRatio;  // uStep / table step (opacity correction)
 uniform float uShading;    // 0 = flat, 1 = lit
+uniform float uGradStep;   // gradient stencil half-width in voxels
 uniform vec4 uBackground;
 
 uniform sampler2D uVolume;
@@ -56,12 +57,24 @@ float density(vec3 tc) {
   return mix(a, b, z - z0);
 }
 
+// Gradient from the 8 corners of a cube uGradStep voxels from tc along
+// each axis. Each component differences two faces of four samples, so
+// voxel noise is averaged in all three directions; it otherwise shows as
+// pits in lit surfaces.
 vec3 gradient(vec3 tc) {
-  vec3 h = 1.0 / uDims.xyz;
+  vec3 h = uGradStep / uDims.xyz;
+  float d000 = density(tc + vec3(-h.x, -h.y, -h.z));
+  float d100 = density(tc + vec3(h.x, -h.y, -h.z));
+  float d010 = density(tc + vec3(-h.x, h.y, -h.z));
+  float d110 = density(tc + vec3(h.x, h.y, -h.z));
+  float d001 = density(tc + vec3(-h.x, -h.y, h.z));
+  float d101 = density(tc + vec3(h.x, -h.y, h.z));
+  float d011 = density(tc + vec3(-h.x, h.y, h.z));
+  float d111 = density(tc + vec3(h.x, h.y, h.z));
   return vec3(
-      density(tc + vec3(h.x, 0.0, 0.0)) - density(tc - vec3(h.x, 0.0, 0.0)),
-      density(tc + vec3(0.0, h.y, 0.0)) - density(tc - vec3(0.0, h.y, 0.0)),
-      density(tc + vec3(0.0, 0.0, h.z)) - density(tc - vec3(0.0, 0.0, h.z))) / h;
+      (d100 + d110 + d101 + d111) - (d000 + d010 + d001 + d011),
+      (d010 + d110 + d011 + d111) - (d000 + d100 + d001 + d101),
+      (d001 + d101 + d011 + d111) - (d000 + d100 + d010 + d110)) / (8.0 * h);
 }
 
 void main() {

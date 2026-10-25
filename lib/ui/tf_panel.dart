@@ -33,112 +33,138 @@ class TransferFunctionPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final lo = volume.minValue, hi = volume.maxValue;
-    return ListView(
-      padding: const EdgeInsets.all(12),
-      children: [
-        Text('Rendering', style: theme.textTheme.titleSmall),
-        const SizedBox(height: 8),
-        SegmentedButton<RenderMode>(
-          segments: const [
-            ButtonSegment(value: RenderMode.surfaces, label: Text('Level sets')),
-            ButtonSegment(value: RenderMode.volume, label: Text('Volume')),
-          ],
-          selected: {tf.mode},
-          onSelectionChanged: (s) {
-            tf.mode = s.first;
-            onChanged();
-          },
-        ),
-        Row(children: [
-          const Text('Lighting'),
-          const Spacer(),
-          Switch(
-            value: settings.shading,
-            onChanged: (v) {
-              settings.shading = v;
-              settings.changed();
+    // Rebuild when [settings] change, so its slider and switch move.
+    return ListenableBuilder(
+      listenable: settings,
+      builder: (context, _) => ListView(
+        padding: const EdgeInsets.all(12),
+        children: [
+          Text('Rendering', style: theme.textTheme.titleSmall),
+          const SizedBox(height: 8),
+          SegmentedButton<RenderMode>(
+            segments: const [
+              ButtonSegment(value: RenderMode.surfaces, label: Text('Level sets')),
+              ButtonSegment(value: RenderMode.volume, label: Text('Volume')),
+            ],
+            selected: {tf.mode},
+            onSelectionChanged: (s) {
+              tf.mode = s.first;
+              onChanged();
             },
           ),
-        ]),
-        Row(children: [
-          const Text('Step'),
-          Expanded(
-            child: Slider(
-              value: settings.stepVoxels,
-              min: 0.25,
-              max: 2,
-              divisions: 7,
-              label: '${settings.stepVoxels} voxel',
+          Row(children: [
+            const Text('Lighting'),
+            const Spacer(),
+            Switch(
+              value: settings.shading,
               onChanged: (v) {
-                settings.stepVoxels = v;
+                settings.shading = v;
                 settings.changed();
               },
             ),
+          ]),
+          Row(children: [
+            const Text('Step'),
+            Expanded(
+              child: Slider(
+                value: settings.stepVoxels,
+                min: 0.25,
+                max: 2,
+                divisions: 7,
+                label: '${settings.stepVoxels} voxel',
+                onChanged: (v) {
+                  settings.stepVoxels = v;
+                  settings.changed();
+                },
+              ),
+            ),
+            SizedBox(width: 64, child: Text('${settings.stepVoxels} vox')),
+          ]),
+          Row(children: [
+            const Text('Smooth'),
+            Expanded(
+              child: Slider(
+                value: settings.normalSmoothing,
+                min: 1,
+                max: 4,
+                divisions: 6,
+                label: '${settings.normalSmoothing} voxel',
+                onChanged: settings.shading
+                    ? (v) {
+                        settings.normalSmoothing = v;
+                        settings.changed();
+                      }
+                    : null,
+              ),
+            ),
+            SizedBox(
+              width: 64,
+              child: Text('${settings.normalSmoothing} vox'),
+            ),
+          ]),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton.icon(
+              icon: const Icon(Icons.center_focus_strong),
+              label: const Text('Reset view'),
+              onPressed: onResetView,
+            ),
           ),
-          SizedBox(width: 64, child: Text('${settings.stepVoxels} vox')),
-        ]),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: OutlinedButton.icon(
-            icon: const Icon(Icons.center_focus_strong),
-            label: const Text('Reset view'),
-            onPressed: onResetView,
-          ),
-        ),
-        const Divider(height: 24),
-        Text('Visible densities', style: theme.textTheme.titleSmall),
-        const SizedBox(height: 8),
-        SizedBox(height: 90, child: _Histogram(volume: volume, tf: tf)),
-        // The slider uses the same scale as the histogram: the GPU's 8-bit
-        // codes, which give most of the width to tissue and bone.
-        RangeSlider(
-          values: RangeValues(volume.map.encode(tf.showMin).clamp(0, 255),
-              volume.map.encode(tf.showMax).clamp(0, 255)),
-          min: 0,
-          max: 255,
-          onChanged: (r) {
-            tf.showMin = r.start <= 0 ? lo : volume.map.decode(r.start);
-            tf.showMax = r.end >= 255 ? hi : volume.map.decode(r.end);
-            onChanged();
-          },
-        ),
-        Row(children: [
-          Expanded(child: _NumberField(
-            label: 'Hide below',
-            value: tf.showMin,
-            onSubmitted: (v) {
-              tf.showMin = v.clamp(lo, tf.showMax);
+          const Divider(height: 24),
+          Text('Visible densities', style: theme.textTheme.titleSmall),
+          const SizedBox(height: 8),
+          SizedBox(height: 90, child: _Histogram(volume: volume, tf: tf)),
+          // The slider uses the same scale as the histogram: the GPU's 8-bit
+          // codes, which give most of the width to tissue and bone.
+          RangeSlider(
+            values: RangeValues(volume.map.encode(tf.showMin).clamp(0, 255),
+                volume.map.encode(tf.showMax).clamp(0, 255)),
+            min: 0,
+            max: 255,
+            onChanged: (r) {
+              tf.showMin = r.start <= 0 ? lo : volume.map.decode(r.start);
+              tf.showMax = r.end >= 255 ? hi : volume.map.decode(r.end);
               onChanged();
             },
-          )),
-          const SizedBox(width: 8),
-          Expanded(child: _NumberField(
-            label: 'Hide above',
-            value: tf.showMax,
-            onSubmitted: (v) {
-              tf.showMax = v.clamp(tf.showMin, hi);
-              onChanged();
-            },
-          )),
-        ]),
-        const Divider(height: 24),
-        Row(children: [
-          Text('Density bands', style: theme.textTheme.titleSmall),
-          const Spacer(),
-          TextButton(
-            onPressed: () => _editBands(context),
-            child: const Text('Edit bands…'),
           ),
-        ]),
-        Text(
-          tf.mode == RenderMode.surfaces
-              ? 'Opacity of the surface at each band\'s lower edge.'
-              : 'Opacity per ${volumeOpacityDepth.round()} voxels of depth within each band.',
-          style: theme.textTheme.bodySmall,
-        ),
-        const SizedBox(height: 4),
-        for (final b in tf.bands.reversed) _bandRow(context, b),
-      ],
+          Row(children: [
+            Expanded(child: _NumberField(
+              label: 'Hide below',
+              value: tf.showMin,
+              onSubmitted: (v) {
+                tf.showMin = v.clamp(lo, tf.showMax);
+                onChanged();
+              },
+            )),
+            const SizedBox(width: 8),
+            Expanded(child: _NumberField(
+              label: 'Hide above',
+              value: tf.showMax,
+              onSubmitted: (v) {
+                tf.showMax = v.clamp(tf.showMin, hi);
+                onChanged();
+              },
+            )),
+          ]),
+          const Divider(height: 24),
+          Row(children: [
+            Text('Density bands', style: theme.textTheme.titleSmall),
+            const Spacer(),
+            TextButton(
+              onPressed: () => _editBands(context),
+              child: const Text('Edit bands…'),
+            ),
+          ]),
+          Text(
+            tf.mode == RenderMode.surfaces
+                ? 'Opacity of the surface at each band\'s lower edge.'
+                : 'Opacity per ${volumeOpacityDepth.round()} voxels of depth within each band.',
+            style: theme.textTheme.bodySmall,
+          ),
+          const SizedBox(height: 4),
+          for (final b in tf.bands.reversed) _bandRow(context, b),
+        ],
+      ),
     );
   }
 
