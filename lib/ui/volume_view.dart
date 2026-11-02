@@ -82,6 +82,7 @@ class VolumeViewState extends State<VolumeView> {
   int _tableVersion = -1;
   bool _tableBusy = false;
   int _buttons = 0;
+  final _touches = <int, Offset>{};
 
   @override
   void initState() {
@@ -177,16 +178,51 @@ class VolumeViewState extends State<VolumeView> {
     }
   }
 
-  void _onPointerDown(PointerDownEvent e) => _buttons = e.buttons;
+  void _onPointerDown(PointerDownEvent e) {
+    _buttons = e.buttons;
+    if (e.kind == ui.PointerDeviceKind.touch) _touches[e.pointer] = e.localPosition;
+  }
+
+  void _onPointerEnd(PointerEvent e) => _touches.remove(e.pointer);
+
+  /// Centroid of [_touches] and their mean distance from it.
+  (Offset, double) _touchSpread() {
+    var c = Offset.zero;
+    for (final p in _touches.values) {
+      c += p;
+    }
+    c /= _touches.length.toDouble();
+    var r = 0.0;
+    for (final p in _touches.values) {
+      r += (p - c).distance;
+    }
+    return (c, r / _touches.length);
+  }
+
+  /// Two or more fingers: spreading them zooms and moving them together pans.
+  void _onTouchesMoved(PointerMoveEvent e) {
+    final (c0, r0) = _touchSpread();
+    _touches[e.pointer] = e.localPosition;
+    final (c1, r1) = _touchSpread();
+    final d = c1 - c0;
+    final s = camera.worldPerPixel((context.size ?? const Size(1, 1)).shortestSide);
+    camera.pan -= vm.Vector2(d.dx * s, -d.dy * s);
+    if (r0 > 0 && r1 > 0) _zoom(r0 / r1);
+    _bump();
+  }
 
   void _onPointerMove(PointerMoveEvent e) {
+    if (_touches.containsKey(e.pointer) && _touches.length >= 2) {
+      _onTouchesMoved(e);
+      return;
+    }
     final d = e.delta;
     final keys = HardwareKeyboard.instance;
     final size = context.size ?? const Size(1, 1);
     final panButtons = kSecondaryMouseButton | kMiddleMouseButton;
     if ((_buttons & panButtons) != 0 ||
         ((_buttons & kPrimaryMouseButton) != 0 && keys.isShiftPressed)) {
-      final s = camera.worldPerPixel(size.height);
+      final s = camera.worldPerPixel(size.shortestSide);
       camera.pan -= vm.Vector2(d.dx * s, -d.dy * s);
     } else if ((_buttons & kPrimaryMouseButton) != 0 && keys.isControlPressed) {
       _zoom(math.exp(d.dy * 0.01));
@@ -238,6 +274,8 @@ class VolumeViewState extends State<VolumeView> {
     return Listener(
       onPointerDown: _onPointerDown,
       onPointerMove: _onPointerMove,
+      onPointerUp: _onPointerEnd,
+      onPointerCancel: _onPointerEnd,
       onPointerSignal: _onSignal,
       onPointerPanZoomStart: _onPanZoomStart,
       onPointerPanZoomUpdate: _onPanZoomScale,
@@ -312,7 +350,8 @@ class _RaycastPainter extends CustomPainter {
     v3(camera.right);
     v3(camera.up);
     v3(camera.forward);
-    f(camera.tanHalfFov);
+    // The field of view spans the shorter side, so a tall view shows it all.
+    f(camera.tanHalfFov * size.height / size.shortestSide);
     f(step);
     // Surface opacity is per crossing; volume opacity is per
     // volumeOpacityDepth voxels of depth.

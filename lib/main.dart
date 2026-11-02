@@ -1,7 +1,9 @@
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
 
 import 'dicom/series.dart';
 import 'platform/platform.dart';
@@ -11,8 +13,14 @@ import 'ui/image_view.dart';
 import 'ui/tf_panel.dart';
 import 'ui/volume_view.dart';
 
+/// Below this width the side panels would leave too little of the view, so
+/// the controls move to a floating panel opened from a menu button.
+const sidePanelsMinWidth = 1000.0;
+
 void main(List<String> args) {
   WidgetsFlutterBinding.ensureInitialized();
+  // Right-drag pans the view.
+  if (kIsWeb) BrowserContextMenu.disableContextMenu();
   if (logFrameTimes) _logFrameTimes();
   runApp(DicomVizApp(initialFolder: args.isNotEmpty ? args.first : lastFolder()));
 }
@@ -77,6 +85,11 @@ class _ViewerPageState extends State<ViewerPage> {
 
   // 2D state.
   ImageStack? _stack;
+  final _stackKey = GlobalKey();
+
+  // Floating panel in the narrow layout.
+  bool _panelOpen = true;
+  bool _panelShowsRendering = false;
 
   int _loadToken = 0;
 
@@ -122,6 +135,7 @@ class _ViewerPageState extends State<ViewerPage> {
       _selected = s;
       _error = null;
       _stack = null;
+      _panelOpen = false;
       _progress = 0;
       _progressText = 'Loading';
     });
@@ -182,33 +196,128 @@ class _ViewerPageState extends State<ViewerPage> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final isVolume = _selected?.isVolume ?? false;
     return Scaffold(
-      body: Row(children: [
-        SizedBox(width: 260, child: _seriesPanel(theme)),
+      body: LayoutBuilder(
+        builder: (context, c) => c.maxWidth >= sidePanelsMinWidth
+            ? _wideLayout(theme)
+            : _narrowLayout(theme, c),
+      ),
+    );
+  }
+
+  Widget _wideLayout(ThemeData theme) {
+    final rendering = _renderingPanel();
+    return Row(children: [
+      SizedBox(width: 260, child: _seriesPanel(theme)),
+      const VerticalDivider(width: 1),
+      Expanded(child: _viewer(theme, wide: true)),
+      if (rendering != null) ...[
         const VerticalDivider(width: 1),
-        Expanded(child: _viewer(theme)),
-        if (isVolume && _volume != null && _tf != null && _progress == null) ...[
-          const VerticalDivider(width: 1),
-          SizedBox(
-            width: 330,
-            child: TransferFunctionPanel(
-              volume: _volume!,
-              tf: _tf!,
-              settings: _settings,
-              onChanged: _tfChanged,
-              onReset: (count, from, to) {
-                final mode = _tf!.mode;
-                setState(() {
-                  _tf = _defaultTf(_volume!, count: count, from: from, to: to)..mode = mode;
-                  _tfVersion++;
-                });
-              },
-              onResetView: () => _viewKey.currentState?.resetView(),
+        SizedBox(width: 330, child: rendering),
+      ],
+    ]);
+  }
+
+  /// The view fills the window. The panel does not block it, so the effect
+  /// of a change can be seen while making it.
+  Widget _narrowLayout(ThemeData theme, BoxConstraints c) {
+    final rendering = _renderingPanel();
+    final landscape = c.maxWidth > c.maxHeight;
+    final shadeHeight = c.maxHeight * 0.55;
+    const panelWidth = 340.0;
+    // Slide the 3D view so its center stays in the middle of the part of the
+    // window the panel leaves free. Moving it keeps the zoom and fills that part.
+    final inset = MediaQuery.paddingOf(context);
+    final slide = !_panelOpen || !(_selected?.isVolume ?? false)
+        ? Offset.zero
+        : landscape
+            ? Offset(-(panelWidth + 16 + inset.right) / 2 / c.maxWidth, 0)
+            : Offset(0, -(shadeHeight + 16 + inset.bottom) / 2 / c.maxHeight);
+    return Stack(children: [
+      Positioned.fill(
+        child: AnimatedSlide(
+          offset: slide,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+          child: _viewer(theme, wide: false),
+        ),
+      ),
+      if (_panelOpen)
+        SafeArea(
+          child: Align(
+            alignment: landscape ? Alignment.bottomRight : Alignment.bottomCenter,
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(8, landscape ? 56 : 8, 8, 8),
+              child: SizedBox(
+                width: landscape ? panelWidth : double.infinity,
+                height: landscape ? double.infinity : shadeHeight,
+                child: Material(
+                  color: theme.colorScheme.surfaceContainer,
+                  elevation: 8,
+                  borderRadius: BorderRadius.circular(12),
+                  clipBehavior: Clip.antiAlias,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (rendering != null)
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+                          child: SegmentedButton<bool>(
+                            segments: const [
+                              ButtonSegment(value: false, label: Text('Series')),
+                              ButtonSegment(value: true, label: Text('Rendering')),
+                            ],
+                            selected: {_panelShowsRendering},
+                            showSelectedIcon: false,
+                            onSelectionChanged: (s) =>
+                                setState(() => _panelShowsRendering = s.first),
+                          ),
+                        ),
+                      Expanded(
+                        child: rendering != null && _panelShowsRendering
+                            ? rendering
+                            : _seriesPanel(theme),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             ),
           ),
-        ],
-      ]),
+        ),
+      SafeArea(
+        child: Align(
+          alignment: Alignment.topRight,
+          child: Padding(
+            padding: const EdgeInsets.all(8),
+            child: IconButton.filledTonal(
+              icon: Icon(_panelOpen ? Icons.close : Icons.menu,
+                  semanticLabel: _panelOpen ? 'Hide controls' : 'Show controls'),
+              onPressed: () => setState(() => _panelOpen = !_panelOpen),
+            ),
+          ),
+        ),
+      ),
+    ]);
+  }
+
+  /// Controls for the current volume, or null if none is shown.
+  Widget? _renderingPanel() {
+    final isVolume = _selected?.isVolume ?? false;
+    if (!isVolume || _volume == null || _tf == null || _progress != null) return null;
+    return TransferFunctionPanel(
+      volume: _volume!,
+      tf: _tf!,
+      settings: _settings,
+      onChanged: _tfChanged,
+      onReset: (count, from, to) {
+        final mode = _tf!.mode;
+        setState(() {
+          _tf = _defaultTf(_volume!, count: count, from: from, to: to)..mode = mode;
+          _tfVersion++;
+        });
+      },
+      onResetView: () => _viewKey.currentState?.resetView(),
     );
   }
 
@@ -250,7 +359,7 @@ class _ViewerPageState extends State<ViewerPage> {
         ],
       );
 
-  Widget _viewer(ThemeData theme) {
+  Widget _viewer(ThemeData theme, {required bool wide}) {
     if (_error != null) {
       return Center(child: Text(_error!, style: TextStyle(color: theme.colorScheme.error)));
     }
@@ -282,18 +391,21 @@ class _ViewerPageState extends State<ViewerPage> {
           tfVersion: _tfVersion,
           settings: _settings,
         ),
-        Positioned(
-          left: 12,
-          bottom: 8,
-          child: Text(
-            'Left drag: rotate · Right/middle or Shift+drag: pan · '
-            'Scroll or Ctrl+drag: zoom · Double-click: reset',
-            style: theme.textTheme.bodySmall?.copyWith(color: Colors.white54),
+        if (wide)
+          Positioned(
+            left: 12,
+            bottom: 8,
+            child: Text(
+              'Left drag: rotate · Right/middle or Shift+drag: pan · '
+              'Scroll or Ctrl+drag: zoom · Double-click: reset',
+              style: theme.textTheme.bodySmall?.copyWith(color: Colors.white54),
+            ),
           ),
-        ),
       ]);
     }
-    if (_stack != null) return ImageStackView(stack: _stack!);
+    if (_stack != null) {
+      return ImageStackView(key: _stackKey, stack: _stack!, reserveTopRight: !wide);
+    }
     return const SizedBox.shrink();
   }
 }

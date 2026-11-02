@@ -15,8 +15,11 @@ const _bandCount = 12;
 
 /// Viewer for 2D series: single images or multi-frame stacks.
 class ImageStackView extends StatefulWidget {
-  const ImageStackView({super.key, required this.stack});
+  const ImageStackView({super.key, required this.stack, this.reserveTopRight = false});
   final ImageStack stack;
+
+  /// Keeps the controls clear of a button in the top right corner.
+  final bool reserveTopRight;
 
   @override
   State<ImageStackView> createState() => _ImageStackViewState();
@@ -147,8 +150,10 @@ class _ImageStackViewState extends State<ImageStackView> {
     return Column(
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-          child: Row(
+          padding: EdgeInsets.fromLTRB(16, 8, widget.reserveTopRight ? 64 : 16, 0),
+          child: Wrap(
+            spacing: 24,
+            crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               SegmentedButton<Palette>(
                 segments: const [
@@ -164,26 +169,28 @@ class _ImageStackViewState extends State<ImageStackView> {
                   if (_frame != null) _render();
                 },
               ),
-              const SizedBox(width: 24),
-              const Text('Invert'),
-              const SizedBox(width: 8),
-              Switch(
-                value: _invert,
-                onChanged: (v) {
-                  setState(() => _invert = v);
-                  if (_frame != null) _render();
-                },
-              ),
-              const SizedBox(width: 24),
-              const Text('Equalize'),
-              const SizedBox(width: 8),
-              Switch(
-                value: _equalize,
-                onChanged: (v) {
-                  setState(() => _equalize = v);
-                  if (_frame != null) _render();
-                },
-              ),
+              Row(mainAxisSize: MainAxisSize.min, children: [
+                const Text('Invert'),
+                const SizedBox(width: 8),
+                Switch(
+                  value: _invert,
+                  onChanged: (v) {
+                    setState(() => _invert = v);
+                    if (_frame != null) _render();
+                  },
+                ),
+              ]),
+              Row(mainAxisSize: MainAxisSize.min, children: [
+                const Text('Equalize'),
+                const SizedBox(width: 8),
+                Switch(
+                  value: _equalize,
+                  onChanged: (v) {
+                    setState(() => _equalize = v);
+                    if (_frame != null) _render();
+                  },
+                ),
+              ]),
             ],
           ),
         ),
