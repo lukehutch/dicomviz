@@ -12,6 +12,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:dicomviz/dicom/series.dart';
+import 'package:dicomviz/platform/platform.dart';
 
 /// HU at voxel (x, y, z) of [v], through its 8-bit code.
 double hu(VolumeData v, int x, int y, int z) {
@@ -25,9 +26,9 @@ Future<void> main(List<String> args) async {
     stderr.writeln('usage: check_reconstruction <DICOM folder>');
     exit(2);
   }
-  final series = await scanFolder(args[0]);
+  final series = await scanFiles((await listFolder(args[0])).files);
   final i = series.indexWhere((s) => s.reconstruct);
-  if (i <= 0 || series[i - 1].files.first != series[i].files.first) {
+  if (i <= 0 || series[i - 1].files.first.path != series[i].files.first.path) {
     stderr.writeln('no reconstruction listed after its projection series');
     exit(1);
   }

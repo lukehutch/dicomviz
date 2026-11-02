@@ -1,10 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
-import 'dart:ffi';
-import 'dart:io';
-import 'dart:isolate';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:archive/archive.dart' show ZLibDecoder;
+
+import '../platform/platform.dart';
 import 'dicom_parser.dart';
 import 'series.dart';
 
@@ -112,69 +113,31 @@ Map<String, dynamic>? _vendorJson(DicomFile f, int tag) {
   final e = f.elements[tag];
   if (e == null) return null;
   final raw = base64.decode(ascii.decode(e.bytes).trim());
-  final text = utf8.decode(ZLibDecoder().convert(raw.sublist(4)));
+  final text = utf8.decode(const ZLibDecoder().decodeBytes(raw.sublist(4)));
   return json.decode(text) as Map<String, dynamic>;
 }
 
-// Native memory, so that worker isolates can share the projections and the
-// volume instead of each receiving a copy.
-final _malloc = DynamicLibrary.process()
-    .lookupFunction<
-      Pointer<Void> Function(IntPtr),
-      Pointer<Void> Function(int)
-    >('malloc');
-final _free = DynamicLibrary.process()
-    .lookupFunction<Void Function(Pointer<Void>), void Function(Pointer<Void>)>(
-      'free',
-    );
-
-int _alloc(int bytes) {
-  final p = _malloc(bytes);
-  if (p.address == 0) throw StateError('Out of memory');
-  return p.address;
-}
-
-Float32List _floats(int address, int n) =>
-    Pointer<Float>.fromAddress(address).asTypedList(n);
-Int16List _shorts(int address, int n) =>
-    Pointer<Int16>.fromAddress(address).asTypedList(n);
-
 /// Reconstructs a volume from the projection series [s] in background
-/// isolates.
-Future<VolumeData> reconstructVolume(
-  SeriesInfo s, {
-  Progress? onProgress,
-}) async {
-  final port = ReceivePort();
-  port.listen((m) {
-    if (onProgress != null && m is List) {
-      onProgress(m[0] as double, m[1] as String);
-    }
-  });
-  try {
-    return await _runReconstruct(s.files.first, port.sendPort);
-  } finally {
-    port.close();
-  }
-}
+/// workers.
+Future<VolumeData> reconstructVolume(SeriesInfo s, {Progress? onProgress}) =>
+    _runReconstruct(s.files.first, (m) {
+      if (onProgress != null && m is List) {
+        onProgress(m[0] as double, m[1] as String);
+      }
+    });
 
-// Isolates are started from these small functions so that each closure
-// captures only its arguments.
-Future<VolumeData> _runReconstruct(String path, SendPort progress) =>
-    Isolate.run(() => _reconstruct(path, progress));
+// Tasks are started from these small functions so that each closure
+// captures only its arguments: see [runTask].
+Future<VolumeData> _runReconstruct(SourceFile file, Send onMessage) =>
+    runTask((send) => _reconstruct(file, send), onMessage);
 
-Future<void> _runFilter(_Job job, int first, int count, SendPort done) =>
-    Isolate.run(() => _filter(job, first, count, done));
+Future<void> _runFilter(_Job job, int first, int count, Send onMessage) =>
+    runTask((done) => _filter(job, first, count, done), onMessage);
 
-Future<void> _runBackProject(
-  _Job job,
-  int worker,
-  int workers,
-  SendPort done,
-) => Isolate.run(() => _backProject(job, worker, workers, done));
+Future<void> _runBackProject(_Job job, int worker, int workers, Send onMessage) =>
+    runTask((done) => _backProject(job, worker, workers, done), onMessage);
 
-/// What the workers need: the geometry, the sizes and the addresses of the
-/// shared buffers.
+/// What the workers need: the geometry, the sizes and the shared buffers.
 class _Job {
   _Job(
     this.g,
@@ -189,19 +152,19 @@ class _Job {
   final int w, h, frames;
 
   /// -ln(I / air) per frame, row-major; NaN where no X-rays arrived.
-  final int proj;
+  final SharedFloats proj;
 
   /// Filtered projections, column-major per frame (so a voxel column reads
   /// consecutive values).
-  final int filtered;
+  final SharedFloats filtered;
 
   /// HU, slice-major, slices from bottom to top.
-  final int volume;
+  final SharedShorts volume;
 }
 
-Future<VolumeData> _reconstruct(String path, SendPort progress) async {
-  progress.send([0.0, 'Reading projections']);
-  final f = DicomFile.parse(path, File(path).readAsBytesSync());
+Future<VolumeData> _reconstruct(SourceFile file, Send progress) async {
+  progress([0.0, 'Reading projections']);
+  final f = DicomFile.parse(file.path, await file.read());
   final g = ConeBeamGeometry.of(f)!;
   final w = f.columns, h = f.rows, n = f.numberOfFrames;
   final nxy = g.nxy, nz = g.nz;
@@ -211,12 +174,12 @@ Future<VolumeData> _reconstruct(String path, SendPort progress) async {
     w,
     h,
     n,
-    _alloc(n * frameSize * 4),
-    _alloc(n * frameSize * 4),
-    _alloc(nxy * nxy * nz * 2),
+    SharedFloats(n * frameSize),
+    SharedFloats(n * frameSize),
+    SharedShorts(nxy * nxy * nz),
   );
   try {
-    final proj = _floats(job.proj, n * frameSize);
+    final proj = job.proj.list;
     final logAir = math.log(g.airLevel);
     for (var i = 0; i < n; i++) {
       final v = f.decodeFrame(i);
@@ -224,34 +187,29 @@ Future<VolumeData> _reconstruct(String path, SendPort progress) async {
       for (var k = 0; k < frameSize; k++) {
         proj[off + k] = v[k] > 0 ? logAir - math.log(v[k]) : double.nan;
       }
-      if (i % 30 == 0) progress.send([0.05 * i / n, 'Reading projections']);
+      if (i % 30 == 0) progress([0.05 * i / n, 'Reading projections']);
+      await breathe();
     }
 
     // In a Flutter release build, at most about 8 isolates of a group run
     // at once (measured; a standalone Dart program allows about 16). Busy
     // workers beyond that starve this isolate and the UI isolate, which
     // then freeze until a worker finishes, and add no speed.
-    final workers = math.max(1, math.min(Platform.numberOfProcessors, 7));
+    final workers = math.max(1, math.min(processorCount, 7));
     Future<void> phase(
       String stage,
       double from,
       double to,
       int total,
-      Future<void> Function(int worker, SendPort done) run,
+      Future<void> Function(int worker, Send done) run,
     ) async {
-      final port = ReceivePort();
       var count = 0;
-      port.listen((_) {
+      void done(Object? _) {
         count++;
-        progress.send([from + (to - from) * count / total, stage]);
-      });
-      try {
-        await Future.wait([
-          for (var k = 0; k < workers; k++) run(k, port.sendPort),
-        ]);
-      } finally {
-        port.close();
+        progress([from + (to - from) * count / total, stage]);
       }
+
+      await Future.wait([for (var k = 0; k < workers; k++) run(k, done)]);
     }
 
     final per = (n + workers - 1) ~/ workers;
@@ -272,12 +230,12 @@ Future<VolumeData> _reconstruct(String path, SendPort progress) async {
       (k, done) => _runBackProject(job, k, workers, done),
     );
 
-    final vol = _shorts(job.volume, nxy * nxy * nz);
+    final vol = job.volume.list;
     final slices = [
       for (var z = 0; z < nz; z++)
         vol.sublist(z * nxy * nxy, (z + 1) * nxy * nxy),
     ];
-    return packVolume(
+    return await packVolume(
       slices,
       nxy,
       nxy,
@@ -286,9 +244,9 @@ Future<VolumeData> _reconstruct(String path, SendPort progress) async {
       progress,
     );
   } finally {
-    _free(Pointer.fromAddress(job.proj));
-    _free(Pointer.fromAddress(job.filtered));
-    _free(Pointer.fromAddress(job.volume));
+    job.proj.free();
+    job.filtered.free();
+    job.volume.free();
   }
 }
 
@@ -296,11 +254,11 @@ Future<VolumeData> _reconstruct(String path, SendPort progress) async {
 /// detector rows. Two rows go through one complex FFT (one as the real
 /// part, one as the imaginary part), which works because the filter is
 /// real and even.
-void _filter(_Job job, int first, int count, SendPort done) {
+Future<void> _filter(_Job job, int first, int count, Send done) async {
   final g = job.g;
   final w = job.w, h = job.h;
-  final proj = _floats(job.proj, job.frames * w * h);
-  final out = _floats(job.filtered, job.frames * w * h);
+  final proj = job.proj.list;
+  final out = job.filtered.list;
   final fft = _Fft(_fftSize);
 
   // Detector coordinates are scaled to the rotation axis.
@@ -384,17 +342,18 @@ void _filter(_Job job, int first, int count, SendPort done) {
       store(i, r, re, ra);
       if (r + 1 < h) store(i, r + 1, im, rb);
     }
-    done.send(1);
+    done(1);
+    await breathe();
   }
 }
 
 /// Back-projects into the voxel rows y = worker, worker + workers, ...
-void _backProject(_Job job, int worker, int workers, SendPort done) {
+Future<void> _backProject(_Job job, int worker, int workers, Send done) async {
   final g = job.g;
   final w = job.w, h = job.h, n = job.frames;
-  final q = _floats(job.filtered, n * w * h);
+  final q = job.filtered.list;
   final nxy = g.nxy, nz = g.nz;
-  final vol = _shorts(job.volume, nxy * nxy * nz);
+  final vol = job.volume.list;
   final cosB = Float64List(n), sinB = Float64List(n);
   for (var i = 0; i < n; i++) {
     final b =
@@ -454,7 +413,8 @@ void _backProject(_Job job, int worker, int workers, SendPort done) {
         vol[iz * nxy * nxy + out] = hu.round().clamp(-32768, 32767);
       }
     }
-    done.send(1);
+    done(1);
+    await breathe();
   }
 }
 

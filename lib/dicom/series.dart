@@ -1,8 +1,7 @@
-import 'dart:io';
-import 'dart:isolate';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import '../platform/platform.dart';
 import 'cbct.dart';
 import 'dicom_parser.dart';
 
@@ -25,7 +24,7 @@ class SeriesInfo {
   final String description;
   final String modality;
   final int seriesNumber;
-  final List<String> files;
+  final List<SourceFile> files;
   final int rows;
   final int columns;
 
@@ -44,22 +43,24 @@ class SeriesInfo {
 }
 
 class _Header {
-  _Header(this.path, this.f);
-  final String path;
+  _Header(this.file, this.f);
+  final SourceFile file;
   final DicomFile f;
+  String get path => file.path;
   List<double>? get position => f.doubles(Tag.imagePositionPatient);
   List<double>? get orientation => f.doubles(Tag.imageOrientationPatient);
 }
 
-/// Finds all DICOM series under [dir] (recursively).
-Future<List<SeriesInfo>> scanFolder(String dir) => Isolate.run(() => _scan(dir));
+/// Finds all DICOM series in [files].
+Future<List<SeriesInfo>> scanFiles(List<SourceFile> files) =>
+    runTask((_) => _scan(files));
 
-List<SeriesInfo> _scan(String dir) {
+Future<List<SeriesInfo>> _scan(List<SourceFile> files) async {
   final headers = <_Header>[];
-  for (final e in Directory(dir).listSync(recursive: true, followLinks: false)) {
-    if (e is! File) continue;
-    final h = _readHeader(e.path);
+  for (final e in files) {
+    final h = await _readHeader(e);
     if (h != null) headers.add(h);
+    await breathe();
   }
   final groups = <String, List<_Header>>{};
   for (final h in headers) {
@@ -87,7 +88,8 @@ List<SeriesInfo> _scan(String dir) {
         description: first.string(Tag.seriesDescription) ?? '',
         modality: first.string(Tag.modality) ?? '',
         seriesNumber: first.intOr(Tag.seriesNumber, 0),
-        files: [for (final h in hs) h.path]..sort(),
+        files: [for (final h in hs) h.file]
+          ..sort((a, b) => a.path.compareTo(b.path)),
         rows: first.rows,
         columns: first.columns,
         frames: frames,
@@ -101,7 +103,7 @@ List<SeriesInfo> _scan(String dir) {
         description: 'Reconstructed from projections',
         modality: first.string(Tag.modality) ?? '',
         seriesNumber: first.intOr(Tag.seriesNumber, 0),
-        files: [hs.first.path],
+        files: [hs.first.file],
         rows: g.nxy,
         columns: g.nxy,
         frames: g.nz,
@@ -124,27 +126,21 @@ List<SeriesInfo> _scan(String dir) {
   return result;
 }
 
-_Header? _readHeader(String path) {
+Future<_Header?> _readHeader(SourceFile file) async {
   try {
-    final raf = File(path).openSync();
-    try {
-      final len = raf.lengthSync();
-      if (len < 132) return null;
-      // Headers are small; read the start of the file and retry with the
-      // whole file only if the needed tags were not reached.
-      var bytes = raf.readSync(math.min(len, 256 * 1024));
-      if (String.fromCharCodes(bytes, 128, 132) != 'DICM') return null;
-      var f = DicomFile.parse(path, bytes, readPixels: false);
-      if (f.elements[Tag.rows] == null && bytes.length < len) {
-        raf.setPositionSync(0);
-        bytes = raf.readSync(len);
-        f = DicomFile.parse(path, bytes, readPixels: false);
-      }
-      if (f.elements[Tag.rows] == null) return null; // no image
-      return _Header(path, f);
-    } finally {
-      raf.closeSync();
+    final len = await file.length();
+    if (len < 132) return null;
+    // Headers are small; read the start of the file and retry with the
+    // whole file only if the needed tags were not reached.
+    var bytes = await file.read(0, math.min(len, 256 * 1024));
+    if (String.fromCharCodes(bytes, 128, 132) != 'DICM') return null;
+    var f = DicomFile.parse(file.path, bytes, readPixels: false);
+    if (f.elements[Tag.rows] == null && bytes.length < len) {
+      bytes = await file.read();
+      f = DicomFile.parse(file.path, bytes, readPixels: false);
     }
+    if (f.elements[Tag.rows] == null) return null; // no image
+    return _Header(file, f);
   } catch (_) {
     return null;
   }
@@ -219,25 +215,21 @@ class VolumeData {
   final DensityMap map;
 
   /// Voxel counts per 8-bit code.
-  final Int64List histogram;
+  final Uint32List histogram;
   final double minValue;
   final double maxValue;
 
   int get groups => (dims[2] + 2) ~/ 3;
 }
 
-/// Largest atlas side we create. The volume is downsampled when needed.
-const maxAtlasSide = 16384;
-
 typedef Progress = void Function(double fraction, String stage);
 
 /// Loads a volume series in a background isolate.
 Future<VolumeData> loadVolume(SeriesInfo s, {Progress? onProgress}) async {
   if (s.reconstruct) return reconstructVolume(s, onProgress: onProgress);
-  final port = ReceivePort();
   var decoded = 0;
   final total = s.files.length;
-  port.listen((m) {
+  return _runLoadVolume(s.files, (m) {
     if (onProgress == null) return;
     if (m is int) {
       decoded += m;
@@ -246,40 +238,35 @@ Future<VolumeData> loadVolume(SeriesInfo s, {Progress? onProgress}) async {
       onProgress(m[0] as double, m[1] as String);
     }
   });
-  try {
-    return await _runLoadVolume(s.files, port.sendPort);
-  } finally {
-    port.close();
-  }
 }
 
-// Isolates are started from these small functions so that each closure
-// captures only its arguments: a closure sent to an isolate carries its
-// whole enclosing context.
-Future<VolumeData> _runLoadVolume(List<String> files, SendPort progress) =>
-    Isolate.run(() => _loadVolume(files, progress));
+// Tasks are started from these small functions so that each closure
+// captures only its arguments: see [runTask].
+Future<VolumeData> _runLoadVolume(List<SourceFile> files, Send onMessage) =>
+    runTask((send) => _loadVolume(files, send), onMessage);
 
-Future<List<Int16List>> _runDecodeSlices(List<String> paths, SendPort progress) =>
-    Isolate.run(() => _decodeSlices(paths, progress));
+Future<List<Int16List>> _runDecodeSlices(List<SourceFile> files, Send onMessage) =>
+    runTask((send) => _decodeSlices(files, send), onMessage);
 
-List<Int16List> _decodeSlices(List<String> paths, SendPort progress) {
+Future<List<Int16List>> _decodeSlices(List<SourceFile> files, Send progress) async {
   final out = <Int16List>[];
-  for (final p in paths) {
-    final f = DicomFile.parse(p, File(p).readAsBytesSync());
+  for (final p in files) {
+    final f = DicomFile.parse(p.path, await p.read());
     final v = f.decodeFrame(0);
     final s = Int16List(v.length);
     for (var i = 0; i < v.length; i++) {
       s[i] = v[i].round().clamp(-32768, 32767);
     }
     out.add(s);
-    progress.send(1);
+    progress(1);
+    await breathe();
   }
   return out;
 }
 
-Future<VolumeData> _loadVolume(List<String> files, SendPort progress) async {
+Future<VolumeData> _loadVolume(List<SourceFile> files, Send progress) async {
   // Read geometry and sort slices along the normal.
-  final headers = [for (final p in files) _readHeader(p)!];
+  final headers = [for (final p in files) (await _readHeader(p))!];
   final o = headers.first.orientation!;
   final rowDir = [o[0], o[1], o[2]];
   final colDir = [o[3], o[4], o[5]];
@@ -305,16 +292,16 @@ Future<VolumeData> _loadVolume(List<String> files, SendPort progress) async {
   var sz = n > 1 ? (along(headers.last) - along(headers.first)) / (n - 1) : 1.0;
   if (sz.abs() < 1e-6) sz = first.number(Tag.sliceThickness) ?? 1.0;
 
-  // Decode slices in parallel worker isolates.
-  final paths = [for (final hd in headers) hd.path];
-  final workers = math.max(1, math.min(Platform.numberOfProcessors, 16));
+  // Decode slices in parallel workers.
+  final sorted = [for (final hd in headers) hd.file];
+  final workers = math.max(1, math.min(processorCount, 16));
   final slices = List<Int16List?>.filled(n, null);
   final futures = <Future<void>>[];
   for (var wi = 0; wi < workers; wi++) {
     final mine = [for (var i = wi; i < n; i += workers) i];
-    final myPaths = [for (final i in mine) paths[i]];
+    final myFiles = [for (final i in mine) sorted[i]];
     futures.add(() async {
-      final result = await _runDecodeSlices(myPaths, progress);
+      final result = await _runDecodeSlices(myFiles, progress);
       for (var k = 0; k < mine.length; k++) {
         slices[mine[k]] = result[k];
       }
@@ -331,15 +318,15 @@ Future<VolumeData> _loadVolume(List<String> files, SendPort progress) async {
 /// Packs [slices] (each [w] x [h], in order along the slice normal) into an
 /// atlas. [spacing] is the voxel size and [axes] the patient-space
 /// directions of x, y and z, as in [VolumeData].
-VolumeData packVolume(
+Future<VolumeData> packVolume(
   List<Int16List> slices,
   int w,
   int h,
   List<double> spacing,
   List<double> axes,
-  SendPort progress,
-) {
-  progress.send([0.8, 'Packing volume']);
+  Send progress,
+) async {
+  progress([0.8, 'Packing volume']);
   final n = slices.length;
 
   // Value range.
@@ -365,7 +352,7 @@ VolumeData packVolume(
   int dn(int f) => (n + f - 1) ~/ f;
   (int, int, int) layout(int f) {
     final groups = (dn(f) + 2) ~/ 3;
-    var best = (1, 1 << 40, 1 << 40);
+    var best = (1, 0x7fffffff, 0x7fffffff);
     for (var cols = 1; cols <= groups; cols++) {
       final rows = (groups + cols - 1) ~/ cols;
       final aw = cols * dw(f), ah = rows * dh(f);
@@ -375,7 +362,7 @@ VolumeData packVolume(
   }
 
   var (cols, aw, ah) = layout(f);
-  while (math.max(aw, ah) > maxAtlasSide) {
+  while (math.max(aw, ah) > maxTextureSide) {
     f *= 2;
     (cols, aw, ah) = layout(f);
   }
@@ -384,7 +371,7 @@ VolumeData packVolume(
   for (var i = 3; i < atlas.length; i += 4) {
     atlas[i] = 255;
   }
-  final hist = Int64List(256);
+  final hist = Uint32List(256);
   for (var z = 0; z < vn; z++) {
     final g = z ~/ 3, ch = z % 3;
     final tx = (g % cols) * vw, ty = (g ~/ cols) * vh;
@@ -398,7 +385,8 @@ VolumeData packVolume(
         hist[c]++;
       }
     }
-    if (z % 32 == 0) progress.send([0.8 + 0.2 * z / vn, 'Packing']);
+    if (z % 32 == 0) progress([0.8 + 0.2 * z / vn, 'Packing']);
+    await breathe();
   }
 
   return VolumeData(
@@ -422,14 +410,14 @@ class ImageStack {
   final SeriesInfo series;
 
   /// (file, frame index within the file) for each frame.
-  final List<(String, int)> frameRefs;
+  final List<(SourceFile, int)> frameRefs;
   int get length => frameRefs.length;
 }
 
-Future<ImageStack> openImageStack(SeriesInfo s) => Isolate.run(() {
-      final refs = <(String, int)>[];
+Future<ImageStack> openImageStack(SeriesInfo s) => runTask((_) async {
+      final refs = <(SourceFile, int)>[];
       for (final p in s.files) {
-        final h = _readHeader(p);
+        final h = await _readHeader(p);
         final n = h?.f.numberOfFrames ?? 1;
         for (var i = 0; i < n; i++) {
           refs.add((p, i));
@@ -480,8 +468,8 @@ bool _isIntensity(Float32List v, int w, int h) {
   return _median(border) > _median(center);
 }
 
-Future<Frame2D> loadFrame(String path, int index) => Isolate.run(() {
-  final f = DicomFile.parse(path, File(path).readAsBytesSync());
+Future<Frame2D> loadFrame(SourceFile file, int index) => runTask((_) async {
+  final f = DicomFile.parse(file.path, await file.read());
   final v = f.decodeFrame(index);
   final intensity = _isIntensity(v, f.columns, f.rows);
   if (intensity) {

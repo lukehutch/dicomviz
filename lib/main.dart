@@ -1,11 +1,11 @@
-import 'dart:io';
 import 'dart:ui' as ui;
 
-import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
 import 'dicom/series.dart';
+import 'platform/platform.dart';
+import 'platform/pick_folder.dart';
 import 'render/transfer_function.dart';
 import 'ui/image_view.dart';
 import 'ui/tf_panel.dart';
@@ -13,8 +13,8 @@ import 'ui/volume_view.dart';
 
 void main(List<String> args) {
   WidgetsFlutterBinding.ensureInitialized();
-  if (Platform.environment['DICOMVIZ_PERF'] != null) _logFrameTimes();
-  runApp(DicomVizApp(initialFolder: args.isNotEmpty ? args.first : _lastFolder()));
+  if (logFrameTimes) _logFrameTimes();
+  runApp(DicomVizApp(initialFolder: args.isNotEmpty ? args.first : lastFolder()));
 }
 
 /// Prints average build and raster times per second of rendering.
@@ -27,34 +27,10 @@ void _logFrameTimes() {
     if (span < 1000000) return;
     double avg(Duration Function(FrameTiming) f) =>
         times.map((x) => f(x).inMicroseconds).reduce((a, b) => a + b) / times.length / 1000;
-    stdout.writeln('frames: ${times.length}  build ${avg((x) => x.buildDuration).toStringAsFixed(1)} ms'
+    debugPrint('frames: ${times.length}  build ${avg((x) => x.buildDuration).toStringAsFixed(1)} ms'
         '  raster ${avg((x) => x.rasterDuration).toStringAsFixed(1)} ms');
     times.clear();
   });
-}
-
-/// The last opened folder is kept in ~/.config/dicomviz/last_folder.
-File get _lastFolderFile {
-  final config = Platform.environment['XDG_CONFIG_HOME'] ??
-      '${Platform.environment['HOME']}/.config';
-  return File('$config/dicomviz/last_folder');
-}
-
-String? _lastFolder() {
-  try {
-    final p = _lastFolderFile.readAsStringSync().trim();
-    return p.isNotEmpty && Directory(p).existsSync() ? p : null;
-  } catch (_) {
-    return null;
-  }
-}
-
-void _saveLastFolder(String p) {
-  try {
-    _lastFolderFile
-      ..parent.createSync(recursive: true)
-      ..writeAsStringSync(p);
-  } catch (_) {}
 }
 
 class DicomVizApp extends StatelessWidget {
@@ -107,24 +83,26 @@ class _ViewerPageState extends State<ViewerPage> {
   @override
   void initState() {
     super.initState();
-    if (widget.initialFolder != null) _openFolder(widget.initialFolder!);
+    if (widget.initialFolder != null) {
+      listFolder(widget.initialFolder!).then(_openFolder);
+    }
   }
 
   Future<void> _pickFolder() async {
-    final p = await getDirectoryPath(initialDirectory: _folder);
-    if (p != null) _openFolder(p);
+    final f = await pickFolder(_folder);
+    if (f != null) _openFolder(f);
   }
 
-  Future<void> _openFolder(String p) async {
+  Future<void> _openFolder(PickedFolder folder) async {
     setState(() {
-      _folder = p;
+      _folder = folder.name;
       _scanning = true;
       _series = [];
       _error = null;
     });
     try {
-      final s = await scanFolder(p);
-      _saveLastFolder(p);
+      final s = await scanFiles(folder.files);
+      saveLastFolder(folder.name);
       setState(() {
         _series = s;
         _scanning = false;

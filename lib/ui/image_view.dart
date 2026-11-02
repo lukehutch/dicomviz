@@ -69,8 +69,8 @@ class _ImageStackViewState extends State<ImageStackView> {
 
   Future<void> _load(int index) async {
     final token = ++_loading;
-    final (path, frame) = widget.stack.frameRefs[index];
-    final f = await loadFrame(path, frame);
+    final (file, frame) = widget.stack.frameRefs[index];
+    final f = await loadFrame(file, frame);
     if (!mounted || token != _loading) return;
     _window ??= (f.windowCenter - f.windowWidth / 2, f.windowWidth);
     _quantiles ??= _quantilesOf(f.values);

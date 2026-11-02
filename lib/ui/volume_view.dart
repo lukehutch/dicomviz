@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:vector_math/vector_math_64.dart' as vm;
 
 import '../dicom/series.dart';
+import '../platform/platform.dart';
 import '../render/camera.dart';
 import '../render/transfer_function.dart';
 
@@ -21,6 +22,17 @@ Future<ui.Image> imageFromRgba(Uint8List pixels, int width, int height) async {
   descriptor.dispose();
   buffer.dispose();
   return frame.image;
+}
+
+/// Divides the color of RGBA8888 [pixels] by their alpha.
+void _unpremultiply(Uint8List pixels) {
+  for (var i = 0; i < pixels.length; i += 4) {
+    final a = pixels[i + 3];
+    if (a == 0 || a == 255) continue;
+    for (var c = i; c < i + 3; c++) {
+      pixels[c] = math.min(pixels[c] * 255 / a, 255).round();
+    }
+  }
 }
 
 ui.FragmentProgram? _program;
@@ -147,6 +159,7 @@ class VolumeViewState extends State<VolumeView> {
       while (_tableVersion != widget.tfVersion) {
         final version = widget.tfVersion;
         final bytes = widget.tf.buildTable(widget.volume.map);
+        if (!rawImagesArePremultiplied) _unpremultiply(bytes);
         final img = await imageFromRgba(bytes, 256, 256);
         if (!mounted) {
           img.dispose();
