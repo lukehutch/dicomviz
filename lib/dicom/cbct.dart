@@ -129,13 +129,40 @@ Future<VolumeData> reconstructVolume(SeriesInfo s, {Progress? onProgress}) =>
 // Tasks are started from these small functions so that each closure
 // captures only its arguments: see [runTask].
 Future<VolumeData> _runReconstruct(SourceFile file, Send onMessage) =>
-    runTask((send) => _reconstruct(file, send), onMessage);
+    runWorkerTask(
+      () => ['reconstruct', file.shared],
+      (send) => _reconstruct(file, send),
+      onMessage,
+      VolumeData.fromMessage,
+    );
 
 Future<void> _runFilter(_Job job, int first, int count, Send onMessage) =>
-    runTask((done) => _filter(job, first, count, done), onMessage);
+    runWorkerTask(
+      () => ['filter', job.message, first, count],
+      (done) => _filter(job, first, count, done),
+      onMessage,
+    );
 
 Future<void> _runBackProject(_Job job, int worker, int workers, Send onMessage) =>
-    runTask((done) => _backProject(job, worker, workers, done), onMessage);
+    runWorkerTask(
+      () => ['backProject', job.message, worker, workers],
+      (done) => _backProject(job, worker, workers, done),
+      onMessage,
+    );
+
+/// Runs a request from [runWorkerTask] in a Web Worker.
+Future<Object?> reconstructionRequest(List<Object?> r, Send send) async {
+  int number(int i) => (r[i]! as num).toInt();
+  switch (r[0]) {
+    case 'reconstruct':
+      return (await _reconstruct(SourceFile.attach(r[1]!), send)).toMessage();
+    case 'filter':
+      await _filter(_Job.attach(r[1]! as List<Object?>), number(2), number(3), send);
+    case 'backProject':
+      await _backProject(_Job.attach(r[1]! as List<Object?>), number(2), number(3), send);
+  }
+  return null;
+}
 
 /// What the workers need: the geometry, the sizes and the shared buffers.
 class _Job {
@@ -148,6 +175,53 @@ class _Job {
     this.filtered,
     this.volume,
   );
+
+  /// The job described by [message] in another worker.
+  factory _Job.attach(List<Object?> m) {
+    double v(int i) => (m[i]! as num).toDouble();
+    final g = ConeBeamGeometry(
+      sourceToAxis: v(0),
+      sourceToDetector: v(1),
+      pixel: v(2),
+      u0: v(3),
+      v0: v(4),
+      degreesPerFrame: v(5),
+      airLevel: v(6),
+      radius: v(7),
+      zTop: v(8),
+      zBottom: v(9),
+    );
+    final w = v(10).toInt(), h = v(11).toInt(), n = v(12).toInt();
+    return _Job(
+      g,
+      w,
+      h,
+      n,
+      SharedFloats.attach(m[13]!, n * w * h),
+      SharedFloats.attach(m[14]!, n * w * h),
+      SharedShorts.attach(m[15]!, g.nxy * g.nxy * g.nz),
+    );
+  }
+
+  List<Object?> get message => [
+    g.sourceToAxis,
+    g.sourceToDetector,
+    g.pixel,
+    g.u0,
+    g.v0,
+    g.degreesPerFrame,
+    g.airLevel,
+    g.radius,
+    g.zTop,
+    g.zBottom,
+    w,
+    h,
+    frames,
+    proj.shared,
+    filtered.shared,
+    volume.shared,
+  ];
+
   final ConeBeamGeometry g;
   final int w, h, frames;
 
@@ -182,11 +256,7 @@ Future<VolumeData> _reconstruct(SourceFile file, Send progress) async {
     final proj = job.proj.list;
     final logAir = math.log(g.airLevel);
     for (var i = 0; i < n; i++) {
-      final v = f.decodeFrame(i);
-      final off = i * frameSize;
-      for (var k = 0; k < frameSize; k++) {
-        proj[off + k] = v[k] > 0 ? logAir - math.log(v[k]) : double.nan;
-      }
+      _logFrame(f.decodeFrame(i), proj, i * frameSize, logAir);
       if (i % 30 == 0) progress([0.05 * i / n, 'Reading projections']);
       await breathe();
     }
@@ -195,7 +265,7 @@ Future<VolumeData> _reconstruct(SourceFile file, Send progress) async {
     // at once (measured; a standalone Dart program allows about 16). Busy
     // workers beyond that starve this isolate and the UI isolate, which
     // then freeze until a worker finishes, and add no speed.
-    final workers = math.max(1, math.min(processorCount, 7));
+    final workers = math.max(1, math.min(workerThreads, 7));
     Future<void> phase(
       String stage,
       double from,
@@ -250,11 +320,31 @@ Future<VolumeData> _reconstruct(SourceFile file, Send progress) async {
   }
 }
 
+// The loops below are in plain functions because dart2js turns the locals of
+// an async function into closure variables, which makes the back-projection
+// 4 to 8 times slower (measured). Their async callers only yield.
+
+void _logFrame(Float32List v, Float32List proj, int off, double logAir) {
+  for (var k = 0; k < v.length; k++) {
+    proj[off + k] = v[k] > 0 ? logAir - math.log(v[k]) : double.nan;
+  }
+}
+
 /// Weights and ramp-filters frames [first] to [first] + [count] - 1 along
 /// detector rows. Two rows go through one complex FFT (one as the real
 /// part, one as the imaginary part), which works because the filter is
 /// real and even.
 Future<void> _filter(_Job job, int first, int count, Send done) async {
+  final filterFrame = _frameFilter(job);
+  for (var i = first; i < first + count; i++) {
+    filterFrame(i);
+    done(1);
+    await breathe();
+  }
+}
+
+/// Returns a function that filters one frame.
+void Function(int frame) _frameFilter(_Job job) {
   final g = job.g;
   final w = job.w, h = job.h;
   final proj = job.proj.list;
@@ -328,7 +418,7 @@ Future<void> _filter(_Job job, int first, int count, Send done) async {
     }
   }
 
-  for (var i = first; i < first + count; i++) {
+  return (i) {
     for (var r = 0; r < h; r += 2) {
       final ra = load(i, r, re);
       final rb = r + 1 < h ? load(i, r + 1, im) : (-1, -1);
@@ -342,13 +432,21 @@ Future<void> _filter(_Job job, int first, int count, Send done) async {
       store(i, r, re, ra);
       if (r + 1 < h) store(i, r + 1, im, rb);
     }
+  };
+}
+
+/// Back-projects into the voxel rows y = worker, worker + workers, ...
+Future<void> _backProject(_Job job, int worker, int workers, Send done) async {
+  final backProjectRow = _rowBackProjector(job);
+  for (var iy = worker; iy < job.g.nxy; iy += workers) {
+    backProjectRow(iy);
     done(1);
     await breathe();
   }
 }
 
-/// Back-projects into the voxel rows y = worker, worker + workers, ...
-Future<void> _backProject(_Job job, int worker, int workers, Send done) async {
+/// Returns a function that back-projects into one voxel row.
+void Function(int iy) _rowBackProjector(_Job job) {
   final g = job.g;
   final w = job.w, h = job.h, n = job.frames;
   final q = job.filtered.list;
@@ -368,7 +466,7 @@ Future<void> _backProject(_Job job, int worker, int workers, Send done) async {
   final x0 = -(nxy - 1) / 2 * reconVoxelMm;
   final r2 = g.radius * g.radius;
 
-  for (var iy = worker; iy < nxy; iy += workers) {
+  return (iy) {
     final y = x0 + iy * reconVoxelMm;
     for (var ix = 0; ix < nxy; ix++) {
       final x = x0 + ix * reconVoxelMm;
@@ -413,9 +511,7 @@ Future<void> _backProject(_Job job, int worker, int workers, Send done) async {
         vol[iz * nxy * nxy + out] = hu.round().clamp(-32768, 32767);
       }
     }
-    done(1);
-    await breathe();
-  }
+  };
 }
 
 /// In-place radix-2 complex FFT.

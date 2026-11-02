@@ -16,13 +16,21 @@ const rawImagesArePremultiplied = true;
 
 final processorCount = Platform.numberOfProcessors;
 
+/// Threads that can share memory; see [SharedFloats].
+final workerThreads = processorCount;
+
 final logFrameTimes = Platform.environment['DICOMVIZ_PERF'] != null;
 
 /// A file chosen by the user. It holds only its path, so it can be sent to
 /// another isolate.
 class SourceFile {
   SourceFile(this.path);
+
+  /// The file passed to a worker as [shared].
+  SourceFile.attach(Object shared) : path = shared as String;
   final String path;
+
+  Object get shared => path;
 
   Future<int> length() => File(path).length();
 
@@ -96,6 +104,16 @@ Future<T> runTask<T>(
 Future<T> _spawn<T>(FutureOr<T> Function(Send send) task, SendPort port) =>
     Isolate.run(() => task(port.send));
 
+/// Runs [task] in a new isolate, like [runTask]. The web build uses [request]
+/// and [decode] instead, since closures cannot reach a Web Worker.
+Future<T> runWorkerTask<T>(
+  List<Object?> Function() request,
+  FutureOr<T> Function(Send send) task,
+  Send onMessage, [
+  T Function(Object? result)? decode,
+]) =>
+    runTask(task, onMessage);
+
 /// Lets the UI run during long work. Isolates do not need it.
 FutureOr<void> breathe() {}
 
@@ -114,6 +132,10 @@ int _alloc(int bytes) {
 
 class SharedFloats {
   SharedFloats(this.length) : _address = _alloc(math.max(length, 1) * 4);
+
+  /// The memory of another worker's [SharedFloats], given as [shared].
+  SharedFloats.attach(Object shared, this.length) : _address = shared as int;
+  Object get shared => _address;
   final int length;
   final int _address;
   Float32List get list => Pointer<Float>.fromAddress(_address).asTypedList(length);
@@ -122,6 +144,10 @@ class SharedFloats {
 
 class SharedShorts {
   SharedShorts(this.length) : _address = _alloc(math.max(length, 1) * 2);
+
+  /// The memory of another worker's [SharedShorts], given as [shared].
+  SharedShorts.attach(Object shared, this.length) : _address = shared as int;
+  Object get shared => _address;
   final int length;
   final int _address;
   Int16List get list => Pointer<Int16>.fromAddress(_address).asTypedList(length);

@@ -197,6 +197,45 @@ class VolumeData {
     required this.maxValue,
   });
 
+  /// The volume sent by [toMessage].
+  factory VolumeData.fromMessage(Object? message) {
+    final m = message! as List<Object?>;
+    int i(int k) => (m[k]! as num).toInt();
+    double d(int k) => (m[k]! as num).toDouble();
+    List<num> list(int k) => (m[k]! as List<Object?>).cast<num>();
+    return VolumeData(
+      dims: [for (final v in list(0)) v.toInt()],
+      spacing: [for (final v in list(1)) v.toDouble()],
+      axes: [for (final v in list(2)) v.toDouble()],
+      atlas: m[3]! as Uint8List,
+      atlasCols: i(4),
+      atlasWidth: i(5),
+      atlasHeight: i(6),
+      map: DensityMap(d(7), d(8), d(9), d(10)),
+      histogram: m[11]! as Uint32List,
+      minValue: d(12),
+      maxValue: d(13),
+    );
+  }
+
+  /// This volume as a message for a Web Worker to send.
+  List<Object?> toMessage() => [
+    dims,
+    spacing,
+    axes,
+    atlas,
+    atlasCols,
+    atlasWidth,
+    atlasHeight,
+    map.lo,
+    map.knee,
+    map.hi,
+    map.kneeCode,
+    histogram,
+    minValue,
+    maxValue,
+  ];
+
   /// Size in voxels (x = columns, y = rows, z = slices).
   final List<int> dims;
 
@@ -329,14 +368,7 @@ Future<VolumeData> packVolume(
   progress([0.8, 'Packing volume']);
   final n = slices.length;
 
-  // Value range.
-  var mn = 32767, mx = -32768;
-  for (final s in slices) {
-    for (final v in s) {
-      if (v < mn) mn = v;
-      if (v > mx) mx = v;
-    }
-  }
+  final (mn, mx) = _valueRange(slices);
   final map = DensityMap.forRange(mn.toDouble(), mx.toDouble());
 
   // Code lookup for every int16 value in range.
@@ -377,13 +409,7 @@ Future<VolumeData> packVolume(
     final tx = (g % cols) * vw, ty = (g ~/ cols) * vh;
     final src = slices[z * f];
     for (var y = 0; y < vh; y++) {
-      final rowOff = ((ty + y) * aw + tx) * 4 + ch;
-      final srcOff = y * f * w;
-      for (var x = 0; x < vw; x++) {
-        final c = lut[src[srcOff + x * f] - mn];
-        atlas[rowOff + x * 4] = c;
-        hist[c]++;
-      }
+      _packRow(src, y * f * w, f, vw, lut, mn, atlas, ((ty + y) * aw + tx) * 4 + ch, hist);
     }
     if (z % 32 == 0) progress([0.8 + 0.2 * z / vn, 'Packing']);
     await breathe();
@@ -402,6 +428,37 @@ Future<VolumeData> packVolume(
     minValue: mn.toDouble(),
     maxValue: mx.toDouble(),
   );
+}
+
+// Plain functions: see the note on async functions in cbct.dart.
+
+(int, int) _valueRange(List<Int16List> slices) {
+  var mn = 32767, mx = -32768;
+  for (final s in slices) {
+    for (final v in s) {
+      if (v < mn) mn = v;
+      if (v > mx) mx = v;
+    }
+  }
+  return (mn, mx);
+}
+
+void _packRow(
+  Int16List src,
+  int srcOff,
+  int f,
+  int width,
+  Uint8List lut,
+  int mn,
+  Uint8List atlas,
+  int rowOff,
+  Uint32List hist,
+) {
+  for (var x = 0; x < width; x++) {
+    final c = lut[src[srcOff + x * f] - mn];
+    atlas[rowOff + x * 4] = c;
+    hist[c]++;
+  }
 }
 
 /// A stack of 2D frames (single images or a multi-frame object).

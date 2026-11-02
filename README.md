@@ -11,10 +11,12 @@ Cone-beam projection series can also be reconstructed into a volume.
 
 ## Web
 
-    flutter build web --wasm --no-web-resources-cdn
+    tool/build_web.sh
 
-Serve `build/web` with any static web server. Multi-threaded rendering needs
-these response headers:
+This runs `flutter build web --wasm --no-web-resources-cdn`, then compiles the
+reconstruction worker to JavaScript. Serve `build/web` with any static web
+server. Multi-threaded rendering and reconstruction need these response
+headers:
 
     Cross-Origin-Opener-Policy: same-origin
     Cross-Origin-Embedder-Policy: require-corp
@@ -24,8 +26,10 @@ uploaded. With `--no-web-resources-cdn`, the page loads no code from a CDN.
 
 Rendering uses WebGL2 through Flutter's skwasm renderer. Limits on web:
 
-- Loading and reconstruction run on one thread, so they take longer than on
-  desktop. They yield regularly to keep the page responsive.
+- Reconstruction runs on 7 workers when the headers above are sent, and on
+  one worker without them, which takes several times longer.
+- Loading runs on one thread, so it takes longer than on desktop. It yields
+  regularly to keep the page responsive.
 - Folder selection uses `webkitdirectory`, which some mobile browsers lack.
 - Volumes must fit in one texture, so the browser's maximum texture size
   limits their resolution.

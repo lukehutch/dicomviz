@@ -356,7 +356,7 @@ class _Reader {
     final frames = <Uint8List>[];
     for (var fi = 0; fi < starts.length; fi++) {
       final lo = starts[fi];
-      final hi = fi + 1 < starts.length ? starts[fi + 1] : 1 << 62;
+      final num hi = fi + 1 < starts.length ? starts[fi + 1] : double.infinity;
       final b = BytesBuilder(copy: false);
       for (var k = 0; k < fragments.length; k++) {
         if (fragmentOffsets[k] >= lo && fragmentOffsets[k] < hi) b.add(fragments[k]);
