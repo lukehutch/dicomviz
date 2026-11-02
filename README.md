@@ -34,6 +34,23 @@ Rendering uses WebGL2 through Flutter's skwasm renderer. Limits on web:
 - Volumes must fit in one texture, so the browser's maximum texture size
   limits their resolution.
 
+## Other platforms
+
+    flutter build macos
+    flutter build windows
+    flutter build apk
+    flutter build ios
+
+macOS and iOS must be built on a Mac with Xcode, and Windows on Windows with
+Visual Studio. These three have not been built or run. Android builds on Linux,
+but not with JDK 26; JDK 21 works.
+
+Opening a folder does not work on iOS, because `file_selector` has no folder
+picker there. On Android it has not been tried, and reading the chosen folder
+may need more storage permission than the app asks for. Android and iOS
+devices may also have a smaller maximum texture size than the 16384 the atlas
+assumes.
+
 ## Layout
 
 Windows at least 1000 px wide show the controls in side panels. In narrower

@@ -5,6 +5,8 @@ import 'dart:isolate';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:ffi/ffi.dart' show malloc;
+
 /// Sends a message to the owner of a task.
 typedef Send = void Function(Object? message);
 
@@ -61,9 +63,11 @@ Future<PickedFolder> listFolder(String dir) async {
   return PickedFolder(dir, files);
 }
 
-/// The last opened folder is kept in ~/.config/dicomviz/last_folder.
+/// The last opened folder is kept in ~/.config/dicomviz/last_folder, or under
+/// %APPDATA% on Windows.
 File get _lastFolderFile {
   final config = Platform.environment['XDG_CONFIG_HOME'] ??
+      Platform.environment['APPDATA'] ??
       '${Platform.environment['HOME']}/.config';
   return File('$config/dicomviz/last_folder');
 }
@@ -119,16 +123,7 @@ FutureOr<void> breathe() {}
 
 // Native memory, so that worker isolates can share the projections and the
 // volume instead of each receiving a copy.
-final _malloc = DynamicLibrary.process()
-    .lookupFunction<Pointer<Void> Function(IntPtr), Pointer<Void> Function(int)>('malloc');
-final _free = DynamicLibrary.process()
-    .lookupFunction<Void Function(Pointer<Void>), void Function(Pointer<Void>)>('free');
-
-int _alloc(int bytes) {
-  final p = _malloc(bytes);
-  if (p.address == 0) throw StateError('Out of memory');
-  return p.address;
-}
+int _alloc(int bytes) => malloc.allocate<Void>(bytes).address;
 
 class SharedFloats {
   SharedFloats(this.length) : _address = _alloc(math.max(length, 1) * 4);
@@ -139,7 +134,7 @@ class SharedFloats {
   final int length;
   final int _address;
   Float32List get list => Pointer<Float>.fromAddress(_address).asTypedList(length);
-  void free() => _free(Pointer.fromAddress(_address));
+  void free() => malloc.free(Pointer<Void>.fromAddress(_address));
 }
 
 class SharedShorts {
@@ -151,5 +146,5 @@ class SharedShorts {
   final int length;
   final int _address;
   Int16List get list => Pointer<Int16>.fromAddress(_address).asTypedList(length);
-  void free() => _free(Pointer.fromAddress(_address));
+  void free() => malloc.free(Pointer<Void>.fromAddress(_address));
 }
