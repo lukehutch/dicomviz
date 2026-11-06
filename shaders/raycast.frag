@@ -25,6 +25,7 @@ uniform float uStepRatio;  // uStep / table step (opacity correction)
 uniform float uShading;    // 0 = flat, 1 = lit
 uniform float uGradStep;   // gradient stencil half-width in voxels
 uniform vec4 uBackground;
+uniform float uScaleByLength; // 1 if opacity is per depth, 0 if per surface crossing
 
 uniform sampler2D uVolume;
 uniform sampler2D uTable;
@@ -107,14 +108,16 @@ void main() {
   vec3 lightDir = -dir;
 
   for (int i = 0; i < MAX_STEPS; i++) {
-    float tn2 = t + uStep;
-    if (tn2 > tFar) break;
+    if (t >= tFar) break;
+    // The last step ends at the far side of the box, so no depth is skipped.
+    float tn2 = min(t + uStep, tFar);
+    float len = (tn2 - t) / uStep;
     vec3 tc = (org + dir * tn2) * toTc + 0.5;
     float sb = density(tc);
     vec4 s = texture(uTable, vec2(sf * 255.0 + 0.5, sb * 255.0 + 0.5) / 256.0);
     if (s.a > 0.002) {
       // Opacity correction when the step differs from the table's step.
-      float a = 1.0 - pow(max(1.0 - s.a, 0.0), uStepRatio);
+      float a = 1.0 - pow(max(1.0 - s.a, 0.0), uStepRatio * mix(1.0, len, uScaleByLength));
       vec3 c = s.rgb * (a / s.a);
       if (uShading > 0.5) {
         vec3 g = gradient(tc);

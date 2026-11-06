@@ -537,6 +537,7 @@ class _Raycast {
     f(background.g);
     f(background.b);
     f(1.0);
+    f(surfaces ? 0.0 : 1.0);
     shader.setImageSampler(0, volumeImage, filterQuality: FilterQuality.low);
     shader.setImageSampler(1, table, filterQuality: FilterQuality.none);
   }
