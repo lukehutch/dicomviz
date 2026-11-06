@@ -13,7 +13,7 @@
 
 uniform vec2 uSize;        // viewport size in pixels
 uniform vec4 uDims;        // volume size in voxels (x, y, z), slice groups
-uniform vec4 uAtlas;       // tile columns, unused, atlas width, atlas height
+uniform vec4 uAtlas;       // tile columns, start jitter (0 or 1), atlas width, atlas height
 uniform vec3 uExtent;      // box half-size in world units
 uniform vec3 uCamPos;      // eye position in volume space
 uniform vec3 uCamRight;    // camera basis in volume space
@@ -99,7 +99,7 @@ void main() {
   }
 
   // Jitter the start to turn sampling bands into fine noise.
-  float jitter = fract(sin(dot(frag, vec2(12.9898, 78.233))) * 43758.5453);
+  float jitter = uAtlas.y * fract(sin(dot(frag, vec2(12.9898, 78.233))) * 43758.5453);
   float t = tNear + jitter * uStep;
   vec3 toTc = 0.5 / uExtent;
   float sf = density((org + dir * t) * toTc + 0.5);

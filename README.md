@@ -56,6 +56,8 @@ atlas assumes.
 
 While the view moves, it is rendered at no more than 60,000 pixels and
 100 ray steps across the volume, then at full quality 250 ms after it stops.
+The full-quality image is rendered offscreen in strips, so that no single GPU
+job runs long, and is shown once all strips are done. A new change stops it.
 On a Pixel 10 Pro XL a moving frame takes 5 to 9 ms and a full-quality
 full-screen frame 350 to 700 ms.
 `--dart-define=DICOMVIZ_PERF=true` prints average frame times, as the
