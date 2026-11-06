@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -77,6 +78,11 @@ class VolumeView extends StatefulWidget {
 class VolumeViewState extends State<VolumeView> {
   late OrbitCamera camera;
   final _repaint = ValueNotifier<int>(0);
+
+  /// True while the view or its settings are changing, and for a moment
+  /// after; frames are then drawn coarsely so they keep up.
+  final _moving = ValueNotifier<bool>(false);
+  Timer? _stillTimer;
   ui.FragmentShader? _shader;
   ui.Image? _table;
   int _tableVersion = -1;
@@ -116,12 +122,18 @@ class VolumeViewState extends State<VolumeView> {
   @override
   void dispose() {
     widget.settings.removeListener(_bump);
+    _stillTimer?.cancel();
     _shader?.dispose();
     _table?.dispose();
     super.dispose();
   }
 
-  void _bump() => _repaint.value++;
+  void _bump() {
+    _moving.value = true;
+    _stillTimer?.cancel();
+    _stillTimer = Timer(const Duration(milliseconds: 250), () => _moving.value = false);
+    _repaint.value++;
+  }
 
   /// Box half-size in mm.
   vm.Vector3 get _extent {
@@ -327,7 +339,8 @@ class VolumeViewState extends State<VolumeView> {
             extent: _extent,
             settings: widget.settings,
             surfaces: widget.tf.mode == RenderMode.surfaces,
-            repaint: _repaint,
+            moving: _moving,
+            repaint: Listenable.merge([_repaint, _moving]),
           ),
         ),
       ),
@@ -345,6 +358,7 @@ class _RaycastPainter extends CustomPainter {
     required this.extent,
     required this.settings,
     required this.surfaces,
+    required this.moving,
     required Listenable repaint,
   }) : super(repaint: repaint);
 
@@ -356,12 +370,48 @@ class _RaycastPainter extends CustomPainter {
   final vm.Vector3 extent;
   final RenderSettings settings;
   final bool surfaces;
+  final ValueListenable<bool> moving;
+
+  /// While moving: the most pixels rendered for the whole view, and the most
+  /// ray steps across the volume's diagonal.
+  static const movingPixels = 60000;
+  static const movingSteps = 100;
+
+  static const _background = Color.fromRGBO(18, 18, 23, 1);
+
+  /// The part of the view the volume box covers, or null if it is off screen.
+  Rect? _volumeRect(Size size) {
+    // Must match the ray directions in raycast.frag.
+    final t = camera.tanHalfFov * size.height / size.shortestSide;
+    final eye = camera.eye;
+    var r = Rect.zero;
+    var first = true;
+    for (var c = 0; c < 8; c++) {
+      final p = vm.Vector3(c & 1 == 0 ? -extent.x : extent.x,
+          c & 2 == 0 ? -extent.y : extent.y, c & 4 == 0 ? -extent.z : extent.z);
+      final rel = p - eye;
+      final z = rel.dot(camera.forward);
+      // A corner at or behind the eye: the box may cover any part of the view.
+      if (z <= 1e-6) return Offset.zero & size;
+      final q = Offset(size.width / 2 + rel.dot(camera.right) / (z * t) * size.height / 2,
+          size.height / 2 - rel.dot(camera.up) / (z * t) * size.height / 2);
+      r = first ? Rect.fromPoints(q, q) : r.expandToInclude(Rect.fromPoints(q, q));
+      first = false;
+    }
+    r = r.inflate(1).intersect(Offset.zero & size);
+    return r.isEmpty ? null : r;
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
+    canvas.drawRect(Offset.zero & size, Paint()..color = _background);
+    final rect = _volumeRect(size);
+    if (rect == null) return;
+    final coarse = moving.value;
     final v = volume;
     final minSpacing = v.spacing.reduce(math.min);
-    final step = minSpacing * settings.stepVoxels;
+    var step = minSpacing * settings.stepVoxels;
+    if (coarse) step = math.max(step, 2 * extent.length / movingSteps);
     var i = 0;
     void f(double x) => shader.setFloat(i++, x);
     void v3(vm.Vector3 x) {
@@ -390,16 +440,34 @@ class _RaycastPainter extends CustomPainter {
     f(step);
     // Surface opacity is per crossing; volume opacity is per
     // volumeOpacityDepth voxels of depth.
-    f(surfaces ? 1.0 : settings.stepVoxels / volumeOpacityDepth);
+    f(surfaces ? 1.0 : step / minSpacing / volumeOpacityDepth);
     f(settings.shading ? 1.0 : 0.0);
     f(settings.normalSmoothing);
-    f(0.07);
-    f(0.07);
-    f(0.09);
+    f(_background.r);
+    f(_background.g);
+    f(_background.b);
     f(1.0);
     shader.setImageSampler(0, volumeImage, filterQuality: FilterQuality.low);
     shader.setImageSampler(1, table, filterQuality: FilterQuality.none);
-    canvas.drawRect(Offset.zero & size, Paint()..shader = shader);
+    final paint = Paint()..shader = shader;
+    final scale = math.sqrt(movingPixels / (size.width * size.height));
+    if (!coarse || scale >= 1) {
+      canvas.drawRect(rect, paint);
+      return;
+    }
+    // Render the covered part into a small image and stretch it over the view.
+    final w = (rect.width * scale).ceil(), h = (rect.height * scale).ceil();
+    final recorder = ui.PictureRecorder();
+    Canvas(recorder)
+      ..scale(w / rect.width, h / rect.height)
+      ..translate(-rect.left, -rect.top)
+      ..drawRect(rect, paint);
+    final picture = recorder.endRecording();
+    final image = picture.toImageSync(w, h);
+    picture.dispose();
+    canvas.drawImageRect(image, Offset.zero & Size(w.toDouble(), h.toDouble()), rect,
+        Paint()..filterQuality = FilterQuality.low);
+    image.dispose();
   }
 
   @override

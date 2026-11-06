@@ -54,7 +54,10 @@ tried and may need more storage permission than the app asks for. Android and
 iOS devices may also have a smaller maximum texture size than the 16384 the
 atlas assumes.
 
-On a Pixel 10 Pro XL, a full-screen frame takes 350 to 700 ms to render.
+While the view moves, it is rendered at no more than 60,000 pixels and
+100 ray steps across the volume, then at full quality 250 ms after it stops.
+On a Pixel 10 Pro XL a moving frame takes 5 to 9 ms and a full-quality
+full-screen frame 350 to 700 ms.
 `--dart-define=DICOMVIZ_PERF=true` prints average frame times, as the
 `DICOMVIZ_PERF` environment variable does on desktop.
 
