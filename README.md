@@ -46,10 +46,22 @@ Visual Studio. These three have not been built or run. Android builds on Linux,
 but not with JDK 26; JDK 21 works.
 
 Opening a folder does not work on iOS, because `file_selector` has no folder
-picker there. On Android it has not been tried, and reading the chosen folder
-may need more storage permission than the app asks for. Android and iOS
-devices may also have a smaller maximum texture size than the 16384 the atlas
-assumes.
+picker there. On Android the app can read folders copied into its own storage,
+`/sdcard/Android/data/com.lukehutch.dicomviz/files/`, for example with
+`adb push`. The app must be installed and started once first, so that Android
+creates that folder owned by the app. Picking a folder elsewhere has not been
+tried and may need more storage permission than the app asks for. Android and
+iOS devices may also have a smaller maximum texture size than the 16384 the
+atlas assumes.
+
+On a Pixel 10 Pro XL, a full-screen frame takes 350 to 700 ms to render.
+`--dart-define=DICOMVIZ_PERF=true` prints average frame times, as the
+`DICOMVIZ_PERF` environment variable does on desktop.
+
+The app has no built-in default folder. A demo build can set one, which is
+opened when no folder is given on the command line and none was saved:
+
+    flutter build apk --dart-define=DICOMVIZ_FOLDER=<path>
 
 ## Layout
 

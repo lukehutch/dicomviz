@@ -12,7 +12,7 @@ class OrbitCamera {
   /// Initial orientation: rows are the camera's right, up and back axes
   /// expressed in volume space.
   final Matrix3 home;
-  final double homeDistance;
+  double homeDistance;
 
   /// Rows: right, up, back (= -forward), in volume space.
   late Matrix3 basis;

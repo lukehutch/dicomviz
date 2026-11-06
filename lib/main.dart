@@ -17,12 +17,20 @@ import 'ui/volume_view.dart';
 /// the controls move to a floating panel opened from a menu button.
 const sidePanelsMinWidth = 1000.0;
 
+/// A folder to open when none is given or saved. Empty unless a demo build
+/// sets it with `--dart-define=DICOMVIZ_FOLDER=<path>`.
+const _defaultFolder = String.fromEnvironment('DICOMVIZ_FOLDER');
+
 void main(List<String> args) {
   WidgetsFlutterBinding.ensureInitialized();
   // Right-drag pans the view.
   if (kIsWeb) BrowserContextMenu.disableContextMenu();
   if (logFrameTimes) _logFrameTimes();
-  runApp(DicomVizApp(initialFolder: args.isNotEmpty ? args.first : lastFolder()));
+  runApp(DicomVizApp(
+    initialFolder: args.isNotEmpty
+        ? args.first
+        : lastFolder() ?? (_defaultFolder.isEmpty ? null : _defaultFolder),
+  ));
 }
 
 /// Prints average build and raster times per second of rendering.
@@ -97,7 +105,15 @@ class _ViewerPageState extends State<ViewerPage> {
   void initState() {
     super.initState();
     if (widget.initialFolder != null) {
-      listFolder(widget.initialFolder!).then(_openFolder);
+      // The panel opens again below if the folder can't be shown.
+      _panelOpen = false;
+      listFolder(widget.initialFolder!).then(_openFolder, onError: (Object e) {
+        if (!mounted) return;
+        setState(() {
+          _panelOpen = true;
+          _error = 'Could not read folder: $e';
+        });
+      });
     }
   }
 
@@ -119,11 +135,13 @@ class _ViewerPageState extends State<ViewerPage> {
       setState(() {
         _series = s;
         _scanning = false;
+        if (s.isEmpty) _panelOpen = true;
       });
       if (s.isNotEmpty) _select(s.first);
     } catch (e) {
       setState(() {
         _scanning = false;
+        _panelOpen = true;
         _error = 'Could not read folder: $e';
       });
     }

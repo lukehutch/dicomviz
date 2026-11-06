@@ -21,7 +21,10 @@ final processorCount = Platform.numberOfProcessors;
 /// Threads that can share memory; see [SharedFloats].
 final workerThreads = processorCount;
 
-final logFrameTimes = Platform.environment['DICOMVIZ_PERF'] != null;
+/// Set by the DICOMVIZ_PERF environment variable, or on Android, where apps
+/// get no environment, by --dart-define=DICOMVIZ_PERF=true.
+final logFrameTimes = Platform.environment['DICOMVIZ_PERF'] != null ||
+    const bool.fromEnvironment('DICOMVIZ_PERF');
 
 /// A file chosen by the user. It holds only its path, so it can be sent to
 /// another isolate.

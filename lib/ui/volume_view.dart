@@ -100,7 +100,10 @@ class VolumeViewState extends State<VolumeView> {
   void didUpdateWidget(VolumeView oldWidget) {
     super.didUpdateWidget(oldWidget);
     final old = oldWidget;
-    if (!identical(old.volume, widget.volume)) camera = _makeCamera();
+    if (!identical(old.volume, widget.volume)) {
+      camera = _makeCamera();
+      _fittedSize = null;
+    }
     if (old.settings != widget.settings) {
       old.settings.removeListener(_bump);
       widget.settings.addListener(_bump);
@@ -143,12 +146,37 @@ class VolumeViewState extends State<VolumeView> {
       ..setRow(0, right)
       ..setRow(1, up)
       ..setRow(2, -fwd);
-    // Distance at which the bounding sphere fills the view height.
+    // Distance at which the bounding sphere fills the view height. It is
+    // replaced by [_fitDistance] once the view's size is known.
     return OrbitCamera(
         home: home, homeDistance: _extent.length / math.sin(OrbitCamera.defaultFovY / 2));
   }
 
+  /// Distance at which the slice through the volume center, perpendicular to
+  /// the home view direction, just fits a view of [size]. On a narrow screen
+  /// its width then fills the screen width.
+  double _fitDistance(Size size) {
+    final e = _extent;
+    double halfWidth(vm.Vector3 u) => u.x.abs() * e.x + u.y.abs() * e.y + u.z.abs() * e.z;
+    // Tangent of the view angle per pixel; the field of view spans the shortest side.
+    final t = camera.tanHalfFov / size.shortestSide;
+    return math.max(halfWidth(camera.home.row0) / (t * size.width),
+        halfWidth(camera.home.row1) / (t * size.height));
+  }
+
+  /// Size the home distance was last fitted to; null after a new camera.
+  Size? _fittedSize;
+
+  void _fitHome(Size size) {
+    if (_fittedSize != null || size.isEmpty) return;
+    _fittedSize = size;
+    camera.homeDistance = _fitDistance(size);
+    camera.distance = camera.homeDistance;
+  }
+
   void resetView() {
+    final size = context.size;
+    if (size != null && !size.isEmpty) camera.homeDistance = _fitDistance(size);
     camera.reset();
     _bump();
   }
@@ -271,6 +299,13 @@ class VolumeViewState extends State<VolumeView> {
     if (shader == null || table == null) {
       return const Center(child: CircularProgressIndicator());
     }
+    return LayoutBuilder(builder: (context, c) {
+      _fitHome(c.biggest);
+      return _input(shader, table);
+    });
+  }
+
+  Widget _input(ui.FragmentShader shader, ui.Image table) {
     return Listener(
       onPointerDown: _onPointerDown,
       onPointerMove: _onPointerMove,
