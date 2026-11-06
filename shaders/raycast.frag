@@ -120,7 +120,11 @@ void main() {
       float a = 1.0 - pow(max(1.0 - s.a, 0.0), uStepRatio * mix(1.0, len, uScaleByLength));
       vec3 c = s.rgb * (a / s.a);
       if (uShading > 0.5) {
-        vec3 g = gradient(tc);
+        // In volume mode, the gradient at the front of the step, outside a
+        // dense structure the ray is entering: inside metal it is noise, and
+        // taken at the back of the step it showed as dark lines across plates
+        // and screws. Level-set surfaces are lit at the back of the step.
+        vec3 g = gradient((org + dir * mix(tn2, t, uScaleByLength)) * toTc + 0.5);
         float gl = length(g);
         if (gl > 1e-4) {
           vec3 n = g / gl;
