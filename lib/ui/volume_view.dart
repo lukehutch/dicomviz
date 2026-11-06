@@ -466,7 +466,7 @@ class _Raycast {
   /// While moving: the most pixels rendered for the whole view, and the most
   /// ray steps across the volume's diagonal.
   static const movingPixels = 60000;
-  static const movingSteps = 100;
+  static const movingSteps = 250;
 
   static const background = Color.fromRGBO(18, 18, 23, 1);
 
