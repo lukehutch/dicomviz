@@ -257,7 +257,12 @@ class _ViewerPageState extends State<ViewerPage> {
           offset: slide,
           duration: const Duration(milliseconds: 200),
           curve: Curves.easeOut,
-          child: _viewer(theme, wide: false),
+          // A tap in the view closes the panel; a drag turns the view and
+          // leaves it open.
+          child: GestureDetector(
+            onTap: _panelOpen ? () => setState(() => _panelOpen = false) : null,
+            child: _viewer(theme, wide: false),
+          ),
         ),
       ),
       if (_panelOpen)
