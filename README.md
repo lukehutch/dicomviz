@@ -54,14 +54,10 @@ tried and may need more storage permission than the app asks for. Android and
 iOS devices may also have a smaller maximum texture size than the 16384 the
 atlas assumes.
 
-While the view moves, it is rendered at no more than 60,000 pixels and
-500 ray steps across the volume, then at full quality 250 ms after it stops.
-With fewer steps, thin bone and metal fall between samples and show as dark
-bands.
-The full-quality image is rendered offscreen in strips, so that no single GPU
-job runs long, and is shown once all strips are done. A new change stops it.
-On a Pixel 10 Pro XL a moving frame takes about 18 ms and a full-quality
-full-screen frame 350 to 700 ms.
+The view is rendered at no more than 60,000 pixels and 500 ray steps across
+the volume, and stretched to fill the window. With fewer steps, thin bone and
+metal fall between samples and show as dark bands. On a Pixel 10 Pro XL a
+frame takes about 17 ms.
 `--dart-define=DICOMVIZ_PERF=true` prints average frame times, as the
 `DICOMVIZ_PERF` environment variable does on desktop.
 

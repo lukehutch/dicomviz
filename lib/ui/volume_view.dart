@@ -79,21 +79,7 @@ class VolumeViewState extends State<VolumeView> {
   late OrbitCamera camera;
   final _repaint = ValueNotifier<int>(0);
 
-  /// Incremented on every change to the view or its settings.
-  int _version = 0;
-
-  /// Full-quality rendering of the view at [_fineVersion] and [_fineSize],
-  /// as strips and where they go. Until it is done, frames are coarse.
-  List<(Rect, ui.Image)>? _fine;
-  int _fineVersion = -1;
-  Size? _fineSize;
-  Size? _laidOutSize;
-  Timer? _stillTimer;
   ui.FragmentShader? _shader;
-
-  /// A second shader for full-quality strips, so coarse frames don't
-  /// change its uniforms while strips are waiting to be rendered.
-  ui.FragmentShader? _fineShader;
   ui.Image? _table;
   int _tableVersion = -1;
   bool _tableBusy = false;
@@ -115,10 +101,7 @@ class VolumeViewState extends State<VolumeView> {
     camera = _makeCamera();
     raycastProgram().then((p) {
       if (!mounted) return;
-      setState(() {
-        _shader = p.fragmentShader();
-        _fineShader = p.fragmentShader();
-      });
+      setState(() => _shader = p.fragmentShader());
       _bump();
     });
     widget.settings.addListener(_bump);
@@ -146,20 +129,12 @@ class VolumeViewState extends State<VolumeView> {
   @override
   void dispose() {
     widget.settings.removeListener(_bump);
-    _stillTimer?.cancel();
-    _disposeFine();
     _shader?.dispose();
-    _fineShader?.dispose();
     _table?.dispose();
     super.dispose();
   }
 
-  /// Redraws coarsely now, and at full quality once nothing has changed for
-  /// 250 ms.
   void _bump() {
-    _version++;
-    _stillTimer?.cancel();
-    _stillTimer = Timer(const Duration(milliseconds: 250), _renderFine);
     _repaint.value++;
   }
 
@@ -352,12 +327,6 @@ class VolumeViewState extends State<VolumeView> {
     }
     return LayoutBuilder(builder: (context, c) {
       _fitHome(c.biggest);
-      if (c.biggest != _laidOutSize) {
-        _laidOutSize = c.biggest;
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) _bump();
-        });
-      }
       return _input(shader, table);
     });
   }
@@ -378,7 +347,6 @@ class VolumeViewState extends State<VolumeView> {
           painter: _RaycastPainter(
             shader: shader,
             raycast: _raycast(shader, table),
-            fine: (size) => _fineVersion == _version && _fineSize == size ? _fine : null,
             repaint: _repaint,
           ),
         ),
@@ -395,71 +363,6 @@ class VolumeViewState extends State<VolumeView> {
         settings: widget.settings,
         surfaces: widget.tf.mode == RenderMode.surfaces,
       );
-
-  /// Device pixels per full-quality strip. Each strip is a separate GPU
-  /// job, kept short so that the driver does not cut it off and so that a
-  /// new change can stop the rendering between strips.
-  static const fineStripPixels = 120000;
-
-  /// Renders the view at full quality, offscreen and one strip at a time,
-  /// and shows it once all strips are done. Stops if the view changes.
-  Future<void> _renderFine() async {
-    final shader = _fineShader, table = _table;
-    final size = _laidOutSize;
-    if (!mounted || shader == null || table == null || size == null || size.isEmpty) return;
-    final version = _version;
-    final dpr = View.of(context).devicePixelRatio;
-    final raycast = _raycast(shader, table);
-    final rect = raycast.volumeRect(size);
-    final pictures = <(Rect, ui.Picture)>[];
-    final strips = <(Rect, ui.Image)>[];
-    var width = 0;
-    if (rect != null) {
-      raycast.setUniforms(shader, size, coarse: false);
-      final paint = Paint()..shader = shader;
-      // Whole device pixels, so that strips meet without gaps.
-      final left = (rect.left * dpr).floor(), right = (rect.right * dpr).ceil();
-      final top = (rect.top * dpr).floor(), bottom = (rect.bottom * dpr).ceil();
-      width = right - left;
-      final rows = math.max(1, fineStripPixels ~/ width);
-      for (var y = top; y < bottom; y += rows) {
-        final r = Rect.fromLTRB(left / dpr, y / dpr, right / dpr, math.min(y + rows, bottom) / dpr);
-        final recorder = ui.PictureRecorder();
-        Canvas(recorder)
-          ..scale(dpr)
-          ..translate(-r.left, -r.top)
-          ..drawRect(r, paint);
-        pictures.add((r, recorder.endRecording()));
-      }
-    }
-    var done = 0;
-    for (final (r, picture) in pictures) {
-      if (!mounted || version != _version) break;
-      strips.add((r, await picture.toImage(width, (r.height * dpr).round())));
-      done++;
-    }
-    for (final (_, picture) in pictures) {
-      picture.dispose();
-    }
-    if (!mounted || version != _version || done < pictures.length) {
-      for (final (_, image) in strips) {
-        image.dispose();
-      }
-      return;
-    }
-    _disposeFine();
-    _fine = strips;
-    _fineVersion = version;
-    _fineSize = size;
-    _repaint.value++;
-  }
-
-  void _disposeFine() {
-    for (final (_, image) in _fine ?? const <(Rect, ui.Image)>[]) {
-      image.dispose();
-    }
-    _fine = null;
-  }
 }
 
 /// What the ray caster needs to draw a view of the volume.
@@ -482,8 +385,8 @@ class _Raycast {
   final RenderSettings settings;
   final bool surfaces;
 
-  /// While moving: the most pixels rendered for the whole view, and the most
-  /// ray steps across the volume's diagonal.
+  /// The most pixels rendered for the whole view, and the most ray steps
+  /// across the volume's diagonal.
   static const movingPixels = 60000;
   static const movingSteps = 500;
 
@@ -513,12 +416,11 @@ class _Raycast {
   }
 
   /// Sets [shader]'s uniforms for the current camera and a view of [size].
-  /// [coarse] takes fewer steps along each ray.
-  void setUniforms(ui.FragmentShader shader, Size size, {required bool coarse}) {
+  void setUniforms(ui.FragmentShader shader, Size size) {
     final v = volume;
     final minSpacing = v.spacing.reduce(math.min);
     var step = minSpacing * settings.stepVoxels;
-    if (coarse) step = math.max(step, 2 * extent.length / movingSteps);
+    step = math.max(step, 2 * extent.length / movingSteps);
     var i = 0;
     void f(double x) => shader.setFloat(i++, x);
     void v3(vm.Vector3 x) {
@@ -534,9 +436,9 @@ class _Raycast {
     f(v.dims[2].toDouble());
     f(v.groups.toDouble());
     f(v.atlasCols.toDouble());
-    // Random start offsets hide banding at full quality, but at the coarse
-    // step and resolution they show as large grains.
-    f(coarse ? 0 : 1);
+    // No random start offsets: at this step and resolution they show as
+    // large grains.
+    f(0);
     f(v.atlasWidth.toDouble());
     f(v.atlasHeight.toDouble());
     v3(extent);
@@ -562,37 +464,22 @@ class _Raycast {
   }
 }
 
-/// Draws the full-quality rendering when there is one for the current view,
-/// and otherwise a coarse one.
 class _RaycastPainter extends CustomPainter {
   _RaycastPainter({
     required this.shader,
     required this.raycast,
-    required this.fine,
     required Listenable repaint,
   }) : super(repaint: repaint);
 
   final ui.FragmentShader shader;
   final _Raycast raycast;
-  final List<(Rect, ui.Image)>? Function(Size size) fine;
 
   @override
   void paint(Canvas canvas, Size size) {
     canvas.drawRect(Offset.zero & size, Paint()..color = _Raycast.background);
-    final strips = fine(size);
-    if (strips != null) {
-      for (final (r, image) in strips) {
-        canvas.drawImageRect(
-            image,
-            Offset.zero & Size(image.width.toDouble(), image.height.toDouble()),
-            r,
-            Paint()..filterQuality = FilterQuality.none);
-      }
-      return;
-    }
     final rect = raycast.volumeRect(size);
     if (rect == null) return;
-    raycast.setUniforms(shader, size, coarse: true);
+    raycast.setUniforms(shader, size);
     final paint = Paint()..shader = shader;
     final scale = math.sqrt(_Raycast.movingPixels / (size.width * size.height));
     if (scale >= 1) {
