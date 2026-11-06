@@ -100,6 +100,15 @@ class VolumeViewState extends State<VolumeView> {
   int _buttons = 0;
   final _touches = <int, Offset>{};
 
+  /// A finger held still drifts by a few pixels, and moves again as it lifts.
+  /// Once it has rested for [_restTime], movements are ignored until it is
+  /// [_restSlop] pixels from where it stopped, so the view does not turn
+  /// slightly after the user has stopped turning it.
+  static const _restTime = Duration(milliseconds: 100);
+  static const _restSlop = 8.0;
+  Offset _turnPos = Offset.zero;
+  Duration _turnTime = Duration.zero;
+
   @override
   void initState() {
     super.initState();
@@ -241,6 +250,8 @@ class VolumeViewState extends State<VolumeView> {
   void _onPointerDown(PointerDownEvent e) {
     _buttons = e.buttons;
     if (e.kind == ui.PointerDeviceKind.touch) _touches[e.pointer] = e.localPosition;
+    _turnPos = e.localPosition;
+    _turnTime = e.timeStamp;
   }
 
   void _onPointerEnd(PointerEvent e) => _touches.remove(e.pointer);
@@ -275,6 +286,14 @@ class VolumeViewState extends State<VolumeView> {
     if (_touches.containsKey(e.pointer) && _touches.length >= 2) {
       _onTouchesMoved(e);
       return;
+    }
+    if (e.kind == ui.PointerDeviceKind.touch) {
+      if (e.timeStamp - _turnTime > _restTime &&
+          (e.localPosition - _turnPos).distance < _restSlop) {
+        return;
+      }
+      _turnPos = e.localPosition;
+      _turnTime = e.timeStamp;
     }
     final d = e.delta;
     final keys = HardwareKeyboard.instance;
@@ -466,7 +485,7 @@ class _Raycast {
   /// While moving: the most pixels rendered for the whole view, and the most
   /// ray steps across the volume's diagonal.
   static const movingPixels = 60000;
-  static const movingSteps = 250;
+  static const movingSteps = 500;
 
   static const background = Color.fromRGBO(18, 18, 23, 1);
 
