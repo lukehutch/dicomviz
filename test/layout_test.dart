@@ -22,7 +22,9 @@ void main() {
       await pumpAt(t, size);
       expect(find.text('Open folder…'), findsOneWidget);
       await t.tap(find.byIcon(Icons.close));
+      // Wait for the panel to slide out.
       await t.pump();
+      await t.pump(const Duration(milliseconds: 300));
       expect(find.text('Open folder…'), findsNothing);
       await t.tap(find.byIcon(Icons.menu));
       await t.pump();

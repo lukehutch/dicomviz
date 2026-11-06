@@ -97,7 +97,10 @@ class _ViewerPageState extends State<ViewerPage> {
 
   // Floating panel in the narrow layout.
   bool _panelOpen = true;
-  bool _panelShowsRendering = false;
+  bool _panelShowsRendering = true;
+
+  /// The panel has slid out of view after closing, and is offstage.
+  bool _panelSlidOut = false;
 
   int _loadToken = 0;
 
@@ -265,49 +268,65 @@ class _ViewerPageState extends State<ViewerPage> {
           ),
         ),
       ),
-      if (_panelOpen)
-        SafeArea(
+      // The panel slides in from the bottom, or from the right in landscape,
+      // with the view. It takes no input while it slides out, and is
+      // offstage once out of view.
+      Offstage(
+        offstage: !_panelOpen && _panelSlidOut,
+        child: SafeArea(
           child: Align(
             alignment: landscape ? Alignment.bottomRight : Alignment.bottomCenter,
             child: Padding(
               padding: EdgeInsets.fromLTRB(8, landscape ? 56 : 8, 8, 8),
-              child: SizedBox(
-                width: landscape ? panelWidth : double.infinity,
-                height: landscape ? double.infinity : shadeHeight,
-                child: Material(
-                  color: theme.colorScheme.surfaceContainer,
-                  elevation: 8,
-                  borderRadius: BorderRadius.circular(12),
-                  clipBehavior: Clip.antiAlias,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      if (rendering != null)
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-                          child: SegmentedButton<bool>(
-                            segments: const [
-                              ButtonSegment(value: false, label: Text('Series')),
-                              ButtonSegment(value: true, label: Text('Rendering')),
-                            ],
-                            selected: {_panelShowsRendering},
-                            showSelectedIcon: false,
-                            onSelectionChanged: (s) =>
-                                setState(() => _panelShowsRendering = s.first),
+              child: IgnorePointer(
+                ignoring: !_panelOpen,
+                child: AnimatedSlide(
+                  offset: _panelOpen
+                      ? Offset.zero
+                      : (landscape ? const Offset(1.2, 0) : const Offset(0, 1.2)),
+                  duration: const Duration(milliseconds: 200),
+                  curve: Curves.easeOut,
+                  onEnd: () => setState(() => _panelSlidOut = !_panelOpen),
+                  child: SizedBox(
+                    width: landscape ? panelWidth : double.infinity,
+                    height: landscape ? double.infinity : shadeHeight,
+                    child: Material(
+                      color: theme.colorScheme.surfaceContainer,
+                      elevation: 8,
+                      borderRadius: BorderRadius.circular(12),
+                      clipBehavior: Clip.antiAlias,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          if (rendering != null)
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+                              child: SegmentedButton<bool>(
+                                segments: const [
+                                  ButtonSegment(value: false, label: Text('Series')),
+                                  ButtonSegment(value: true, label: Text('Rendering')),
+                                ],
+                                selected: {_panelShowsRendering},
+                                showSelectedIcon: false,
+                                onSelectionChanged: (s) =>
+                                    setState(() => _panelShowsRendering = s.first),
+                              ),
+                            ),
+                          Expanded(
+                            child: rendering != null && _panelShowsRendering
+                                ? rendering
+                                : _seriesPanel(theme),
                           ),
-                        ),
-                      Expanded(
-                        child: rendering != null && _panelShowsRendering
-                            ? rendering
-                            : _seriesPanel(theme),
+                        ],
                       ),
-                    ],
+                    ),
                   ),
                 ),
               ),
             ),
           ),
         ),
+      ),
       SafeArea(
         child: Align(
           alignment: Alignment.topRight,
